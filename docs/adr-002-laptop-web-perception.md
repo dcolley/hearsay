@@ -19,7 +19,7 @@ For **mastra2 + web on the laptop only**:
 1. **Browser** is the I/O layer: `getUserMedia` → WebSocket (PCM + JSON control) → local Node; speakers play TTS chunks returned on the same socket.
 2. **Perception** (VAD, turn-yield, turn end, ASR, TTS, vision gates) runs in **local Node** on the Mac (`mastra2` perception WS, default `:4112`).
 3. **Cognition** stays on **Spark** via Mastra’s OpenAI provider (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`).
-4. Raw PCM/JPEG **do not leave the laptop**. Text (transcripts, scene memory strings) may go to Spark over Tailscale/LAN.
+4. Raw PCM/JPEG **do not leave the laptop**. Text (transcripts, scene memory strings) may go to the configured LLM over the local network.
 
 **ADR-001 remains in force for iOS.** This ADR does not authorize server-side audio on the phone path.
 
