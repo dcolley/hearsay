@@ -7,32 +7,39 @@ It is a local voice + vision presence surface: mic and speakers in the browser, 
 > *Hearsay* — what the laptop hears and says. Treat model output as grounded reports, not gospel.
 
 ```
-Browser (web)  ──WebSocket──►  Perception (mastra2 :4112)
+Browser (web)  ──WebSocket──►  Perception service (mastra2 :4112)
        ▲                              │
        │ TTS / HITL / screen share    ▼
        └──────── Studio / agents (mastra2 :4111) ──► your LLM
 ```
 
-How we built it (decisions + code maps): **[LEARN.md](./LEARN.md)**.  
+**Perception is a separate process** from Mastra Studio. Studio (`yarn dev`, `:4111`) serves agents and CopilotKit. Perception (`yarn perception`, `:4112`) is the long-lived WebSocket service for mic PCM, VAD, turn-yield, TTS, and client tools. Presence will not work if only Studio is running. `yarn dev:all` starts both.
+
+How we built it (decisions + code maps): **[LEARN.md](./LEARN.md)** — especially [two processes](LEARN.md#two-processes-one-product).  
 Architecture ADR: [docs/adr-002-laptop-web-perception.md](./docs/adr-002-laptop-web-perception.md).
 
 ## Packages
 
 | Path | Role |
 |------|------|
-| [`mastra2/`](./mastra2) | Mastra Studio (`:4111`), CopilotKit, perception WebSocket (`:4112`), agent + tools |
+| [`mastra2/`](./mastra2) | **Two Node services:** Studio + CopilotKit (`:4111`) and **perception WebSocket** (`:4112`) |
 | [`web/`](./web) | Next.js — Presence (`/presence`) and CopilotKit chat |
 
 ## Quick start
 
 **Requirements:** Node 20+, Yarn 1.x, an OpenAI-compatible chat API (vision-capable model recommended for camera/screenshot).
 
+You need **three** things running: Studio, **perception**, and the web UI.
+
 ```bash
-# 1) Agent + perception
+# 1) Backend — Studio AND perception (separate processes)
 cd mastra2
 cp .env.example .env   # set OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL
 yarn install
-yarn dev:all           # Studio :4111 + perception :4112
+yarn dev:all           # Studio :4111 + perception :4112 together
+# Or separately:
+#   yarn dev           # Studio only — not enough for Presence
+#   yarn perception    # required WebSocket service on :4112
 
 # 2) Frontend (separate terminal)
 cd web
