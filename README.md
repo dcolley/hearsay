@@ -1,24 +1,27 @@
 # Hearsay
 
-Local **eyes and ears** for a laptop: voice presence, webcam, and screen capture, with cognition on your own LLM (Spark / any OpenAI-compatible API).
+**Hearsay is a learning resource** — a working laptop “eyes and ears” stack you can run, break, and steal patterns from.
 
-What you hear and see stays on the machine — transcripts and short scene descriptions may go to the model. Raw mic PCM and JPEGs do not leave the laptop.
+It is a local voice + vision presence surface: mic and speakers in the browser, webcam and screen capture when needed, turn-taking and barge-in in Node, and an agent that talks to **your** OpenAI-compatible LLM (e.g. Spark). Raw audio and frames stay on the machine; only text (and short vision captions) leave for inference.
+
+> *Hearsay* — what the laptop hears and says. Treat model output as grounded reports, not gospel.
 
 ```
 Browser (web)  ──WebSocket──►  Perception (mastra2 :4112)
        ▲                              │
        │ TTS / HITL / screen share    ▼
-       └──────── Studio / agents (mastra2 :4111) ──► Spark
+       └──────── Studio / agents (mastra2 :4111) ──► your LLM
 ```
+
+How we built it (decisions + code maps): **[LEARN.md](./LEARN.md)**.  
+Architecture ADR: [docs/adr-002-laptop-web-perception.md](./docs/adr-002-laptop-web-perception.md).
 
 ## Packages
 
 | Path | Role |
 |------|------|
 | [`mastra2/`](./mastra2) | Mastra Studio (`:4111`), CopilotKit, perception WebSocket (`:4112`), agent + tools |
-| [`web/`](./web) | Next.js UI — Presence (`/presence`) and CopilotKit chat |
-
-Architecture notes: [docs/adr-002-laptop-web-perception.md](./docs/adr-002-laptop-web-perception.md).
+| [`web/`](./web) | Next.js — Presence (`/presence`) and CopilotKit chat |
 
 ## Quick start
 
@@ -33,35 +36,120 @@ yarn dev:all           # Studio :4111 + perception :4112
 
 # 2) Frontend (separate terminal)
 cd web
-cp .env.example .env.local 2>/dev/null || true
-# MASTRA2_URL=http://localhost:4111
+cp .env.example .env.local   # or create with the vars below
 yarn install
 yarn dev               # http://localhost:3001
 ```
 
-Open **http://localhost:3001/presence**, set perception WS to `ws://localhost:4112`, start the mic.
+```bash
+# web/.env.local
+NEXT_PUBLIC_COPILOTKIT_URL=http://localhost:4111/copilotkit
+NEXT_PUBLIC_PERCEPTION_WS_URL=ws://localhost:4112
+MASTRA2_URL=http://localhost:4111
+```
 
-Optional: `TTS_MODE=browser` with Kokoro or system voice in Presence settings; `ASR_MODE=browser` uses Web Speech in the tab.
+Open **http://localhost:3001/presence** → Start mic. Use headphones first; speakers need barge-in + AEC (see learn topics below).
 
-## Agent tools
+---
 
-- **Voice / HITL:** `ask_user`, `offer_choices`
+## Learn by building
+
+Use this index as a backlog of features to implement yourself. Each link jumps to **how we did it**, **decisions**, and **code**.
+
+### Core architecture
+
+| Topic | Start here |
+|-------|------------|
+| Two-process Studio + perception | [LEARN — Two processes](LEARN.md#two-processes-one-product) |
+| Browser I/O, Node owns the loop | [LEARN — Browser is I/O](LEARN.md#browser-is-io-node-is-the-loop) |
+| Privacy: PCM/JPEG stay local | [LEARN — Browser is I/O](LEARN.md#browser-is-io-node-is-the-loop) |
+| Wire protocol (PCM + JSON) | [LEARN — Browser is I/O](LEARN.md#browser-is-io-node-is-the-loop) |
+
+### Voice & turn-taking
+
+| Topic | Start here |
+|-------|------------|
+| Presence UI (mic / transcript / HITL) | [LEARN — Presence UI](LEARN.md#presence-ui) |
+| VAD vs barge-in (turn-yield cascade) | [LEARN — turn-yield](LEARN.md#vad-is-not-barge-in-turn-yield) |
+| Soft-pause then hard yield | [LEARN — turn-yield](LEARN.md#vad-is-not-barge-in-turn-yield) |
+| End of utterance (browser STT vs Whisper) | [LEARN — End of utterance](LEARN.md#end-of-utterance-listen-path) |
+| Streaming TTS by sentence | [LEARN — Streaming spoken replies](LEARN.md#streaming-spoken-replies) |
+| Listen-arm after playback | [LEARN — Listen-arm after TTS](LEARN.md#listen-arm-after-tts) |
+
+### Speaker duplex (the hard part)
+
+| Topic | Start here |
+|-------|------------|
+| Why speakers self-interrupt | [LEARN — Why speakers break](LEARN.md#why-speakers-break-naive-barge-in) |
+| WebRTC loopback AEC sink (TTS-agnostic) | [LEARN — AEC sink](LEARN.md#engine-agnostic-aec-sink) |
+| Spoken-text echo filter on STT | [LEARN — Text echo filter](LEARN.md#text-echo-filter) |
+| Block VAD yield while TTS still playing | [LEARN — Server playback floor](LEARN.md#server-playback-floor) |
+| `playback_done` waits for real playout | [LEARN — Wait for real completion](LEARN.md#wait-for-real-playback-completion) |
+| Hard barge must silence remote audio | [LEARN — AEC sink](LEARN.md#engine-agnostic-aec-sink) |
+
+### Vision & desktop help
+
+| Topic | Start here |
+|-------|------------|
+| Webcam capture + multimodal describe | [LEARN — Webcam tool](LEARN.md#webcam-tool) |
+| Screen / window / tab screenshot | [LEARN — Screenshot tool](LEARN.md#screenshot-tool-desktop-help) |
+| Route “look at the screen” ≠ webcam | [LEARN — Screen vs camera](LEARN.md#screen-vs-camera-routing) |
+| Scene working memory | [LEARN — Memory](LEARN.md#memory) |
+
+### Agent tools & HITL
+
+| Topic | Start here |
+|-------|------------|
+| Client tool bridge (`client.action`) | [LEARN — Client tools](LEARN.md#client-tools-browser-to-agent) |
+| `ask_user` / `offer_choices` | [LEARN — Client tools](LEARN.md#client-tools-browser-to-agent) |
+| Date / time tools | [LEARN — Date / time](LEARN.md#date--time) |
+| Weather & web search | [LEARN — Weather & web search](LEARN.md#weather--web-search) |
+| Mastra skills + agent instructions | [LEARN — Agent, skills](LEARN.md#agent-skills-and-server-tools) |
+
+### TTS engines
+
+| Topic | Start here |
+|-------|------------|
+| System voice vs Kokoro vs HTTP sidecar | [LEARN — TTS engines](LEARN.md#tts-engines) |
+| Only blob/PCM engines get acoustic AEC | [LEARN — AEC sink](LEARN.md#engine-agnostic-aec-sink) |
+
+### Stretch goals (not implemented)
+
+| Topic | Why it’s interesting |
+|-------|----------------------|
+| Single-port Studio + perception | Ops simplicity — [notes](LEARN.md#what-we-consciously-did-not-build) |
+| Software AEC3 / residual metrics | Harder than loopback AEC |
+| Prosody / LM endpointing | Better EOU than silence alone |
+| Speculative ASR | Lower utterance→reply latency |
+| Continuous screen share | Observe without re-picking a window |
+| Click/type desktop control | Screenshot is observe-only today |
+
+Suggested reading order: [LEARN — Suggested reading order](LEARN.md#suggested-reading-order).
+
+---
+
+## Agent tools (runtime)
+
+- **HITL:** `ask_user`, `offer_choices`
 - **Webcam:** `request_camera_frame`
-- **Screen:** `capture_screenshot` (browser share picker)
+- **Screen:** `capture_screenshot`
 - **Clock:** `get_date_time`, `format_date_time`
-- **Weather / search:** `get_weather`, `web_search` (Tavily)
+- **Weather / search:** `get_weather`, `web_search` (needs `TAVILY_API_KEY`)
 
-## Env (mastra2)
+## Env
 
 See [`mastra2/.env.example`](./mastra2/.env.example). Important knobs:
 
-- `OPENAI_*` — Spark / LLM
-- `PERCEPTION_WS_PORT` — default `4112`
-- `BARGE_IN_ENABLED` — speaker duplex (AEC sink + text echo filter)
-- `HEARSAY_RESOURCE_ID` — shared memory id across chat + presence
-- `HEARSAY_TIMEZONE` — optional default for date/time tools
-- `TAVILY_API_KEY` — web search
+| Variable | Role |
+|----------|------|
+| `OPENAI_*` | LLM endpoint |
+| `PERCEPTION_WS_PORT` | default `4112` |
+| `BARGE_IN_ENABLED` | speaker duplex (AEC + echo filter) |
+| `LISTEN_ARM_MS` | post-TTS deaf window |
+| `HEARSAY_RESOURCE_ID` | shared memory across chat + presence |
+| `HEARSAY_TIMEZONE` | default for date/time tools |
+| `TAVILY_API_KEY` | web search |
 
 ## License
 
-Private / as published by the author. Add a `LICENSE` file if you open the project.
+Add a `LICENSE` if you redistribute. No secrets belong in this repo — keep real `.env` local.
