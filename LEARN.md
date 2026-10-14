@@ -152,7 +152,7 @@ Utterances mentioning screen/display/desktop must not auto-grab the webcam. Pres
 
 ---
 
-## Client tools (browser ↔ agent)
+## Client tools (browser to agent)
 
 Agent tools that need the laptop call `ClientBridge.call(tool, args)`. Perception WS sends `client.action`; the browser replies with `tool_result`.
 
