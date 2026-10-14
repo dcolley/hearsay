@@ -3,12 +3,11 @@
 **Status:** Accepted  
 **Date:** 2026-10-12  
 **Updated:** 2026-10-13 (turn-yield cascade)  
-**Deciders:** Derek  
-**Related: laptop eyes/ears loop (mastra2 + web)
+**Related:** laptop eyes/ears loop (mastra2 + web)
 
 ## Context
 
-Hearsay’s phone dock (Phase 0) keeps raw audio on-device and sends only text to Spark (phone dock; out of scope for this repo)). For a **laptop** presence surface (mic, speakers, later webcam), we need browser capture with acoustic echo cancellation, noise suppression, and auto gain — which `getUserMedia` provides for free — plus a local agent loop that can later add vision and barge-in.
+For a **laptop** presence surface (mic, speakers, later webcam), we need browser capture with acoustic echo cancellation, noise suppression, and auto gain — which `getUserMedia` provides for free — plus a local agent loop that can later add vision and barge-in.
 
 Streaming mic audio to a cloud STS provider (OpenAI Realtime, Inworld, etc.) would leave the machine and fight the Spark-only brain.
 
