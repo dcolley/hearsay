@@ -110,7 +110,8 @@ During tool calls and long runs the agent would otherwise go quiet for tens of s
 
 - Narrator: [`mastra2/src/mastra/perception/progress.ts`](mastra2/src/mastra/perception/progress.ts)
 - Wiring: `think()` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
-- Tests: [`progress.test.ts`](mastra2/src/mastra/perception/progress.test.ts), [`session.progress.test.ts`](mastra2/src/mastra/perception/session.progress.test.ts)
+- Memory hygiene: [`narration-guard.ts`](mastra2/src/mastra/perception/narration-guard.ts) strips model-echoed narration lines on write via `HearsayMemory` (the jarvis-desk-bot `strip_progress` lesson, done at the write side instead of in the stream)
+- Tests: [`progress.test.ts`](mastra2/src/mastra/perception/progress.test.ts), [`session.progress.test.ts`](mastra2/src/mastra/perception/session.progress.test.ts), [`narration-guard.test.ts`](mastra2/src/mastra/perception/narration-guard.test.ts), [`memory-hygiene.test.ts`](mastra2/src/mastra/memory/memory-hygiene.test.ts)
 
 ### Listen-arm after TTS
 

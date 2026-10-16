@@ -992,20 +992,25 @@ export class PerceptionSession {
           if (chunk.type === "tool-call") {
             // ADR-003 owns known tools. Local fillers cover names the
             // narrator does not (and stay silent when a progress line fires).
-            const line = narrator.onToolStart(toolName === "?" ? "" : toolName);
-            if (line) {
-              this.enqueueSpeak(line);
-            } else {
-              const filler = toolFillerPhrase(
-                toolName === "?" ? undefined : toolName,
+            // Both respect PROGRESS_ENABLED=false (silent until the answer).
+            if (this.progressOpts.enabled) {
+              const line = narrator.onToolStart(
+                toolName === "?" ? "" : toolName,
               );
-              if (filler && !fillersSpoken.has(toolName)) {
-                fillersSpoken.add(toolName);
-                this.metric("tool_filler_spoken", this.clientNow(), {
-                  tool: toolName,
-                });
-                this.enqueueSpeak(filler);
-                spoke = true;
+              if (line) {
+                this.enqueueSpeak(line);
+              } else {
+                const filler = toolFillerPhrase(
+                  toolName === "?" ? undefined : toolName,
+                );
+                if (filler && !fillersSpoken.has(toolName)) {
+                  fillersSpoken.add(toolName);
+                  this.metric("tool_filler_spoken", this.clientNow(), {
+                    tool: toolName,
+                  });
+                  this.enqueueSpeak(filler);
+                  spoke = true;
+                }
               }
             }
           }

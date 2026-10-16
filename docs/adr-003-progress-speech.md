@@ -53,7 +53,19 @@ model, so we can avoid that problem entirely.
    floor, and barge-in exactly like an answer.
 
 6. **Kill switch:** `PROGRESS_ENABLED=false` restores pre-ADR behaviour
-   (total silence until the answer).
+   (total silence until the answer). It gates *all* narration, including the
+   LiveKit-style tool fillers in `tool-fillers.ts`.
+
+7. **Narration-guard (memory hygiene).** Narration never enters history by
+   construction. The guard covers the side doors: `HearsayMemory.saveMessages`
+   strips sentences that *exactly match* a known narration line from
+   assistant messages before persisting — covering model echo of what was
+   heard, or any future in-stream narration. Only whole sentences match (the
+   model's own "You are still working on it?" is untouched), only assistant
+   messages are filtered, and a pure-echo message is kept intact rather than
+   writing an empty hole. Catchphrase fatigue is handled on the narration
+   side — still-lines rotate three variants — so the guard never needs to
+   guess at read time.
 
 ## Consequences
 

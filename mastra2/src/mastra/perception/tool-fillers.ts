@@ -20,3 +20,8 @@ export function toolFillerPhrase(toolName: string | undefined): string | null {
   if (!toolName || HITL_TOOLS.has(toolName)) return null;
   return FILLERS[toolName] ?? null;
 }
+
+/** Every distinct filler phrase (for the memory narration-guard). */
+export function toolFillerPhrases(): string[] {
+  return [...new Set(Object.values(FILLERS))];
+}

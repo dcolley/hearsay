@@ -100,6 +100,18 @@ export function isProgressLine(text: string): boolean {
   );
 }
 
+/**
+ * Every sentence narration can ever speak (ADR-003 narrator + tool-fillers).
+ * The memory hygiene guard uses this set to strip exact-sentence echoes from
+ * assistant messages before they persist (see narration-guard.ts).
+ */
+export function narrationSentences(): string[] {
+  const lines = new Set<string>([PROGRESS_ACK, ...PROGRESS_STILL]);
+  for (const spec of TOOL_PATTERNS) if (spec.line) lines.add(spec.line);
+  for (const spec of REQUEST_PATTERNS) lines.add(spec.line);
+  return [...lines];
+}
+
 export class ProgressNarrator {
   private readonly request: string;
   private readonly ackAfterMs: number;
