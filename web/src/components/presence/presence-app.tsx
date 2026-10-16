@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Eraser,
   Mic,
   MicOff,
   Radio,
@@ -21,19 +22,32 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { ConversationLog } from "@/components/presence/conversation-log";
 import { PresenceSettingsDialog } from "@/components/presence/presence-settings-dialog";
 import {
   MediaCapture,
   matchChoiceResult,
   type ClientAction,
 } from "@/lib/perception/media-capture";
-import type { AgentState, ServerHelloInfo } from "@/lib/perception/protocol";
+import type {
+  AgentState,
+  ConversationTurn,
+  ServerHelloInfo,
+} from "@/lib/perception/protocol";
 import {
   DEFAULT_PRESENCE_SETTINGS,
   loadPresenceSettings,
   type PresenceSettings,
 } from "@/lib/perception/presence-settings";
+import { savePresenceThreadId } from "@/lib/perception/presence-thread";
 import { cn } from "@/lib/utils";
+
+function newTurnId(prefix: string): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 const STATE_LABEL: Record<AgentState, string> = {
   idle: "Idle — waiting for speech",
@@ -55,8 +69,7 @@ export function PresenceApp() {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState<AgentState>("idle");
   const [partial, setPartial] = useState("");
-  const [transcript, setTranscript] = useState("");
-  const [assistant, setAssistant] = useState("");
+  const [messages, setMessages] = useState<ConversationTurn[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [textInput, setTextInput] = useState("");
   const [threadId, setThreadId] = useState("");
@@ -67,6 +80,11 @@ export function PresenceApp() {
     kind: "ask_user" | "offer_choices";
     prompt: string;
     choices?: string[];
+  } | null>(null);
+  /** getDisplayMedia requires a click — WS-triggered capture is denied. */
+  const [screenShare, setScreenShare] = useState<{
+    id: string;
+    reason: string;
   } | null>(null);
   const [askAnswer, setAskAnswer] = useState("");
   const [listenArmed, setListenArmed] = useState(true);
@@ -186,32 +204,42 @@ export function PresenceApp() {
       }
 
       if (action.tool === "capture_screenshot") {
-        const shot = await capture.captureScreenshot(
-          String(action.args.reason ?? ""),
-        );
-        capture.sendToolResult(action.id, {
-          ok: shot.ok,
-          result: {
-            ok: shot.ok,
-            description: shot.description,
-            width: shot.width,
-            height: shot.height,
-            dataUrl: shot.dataUrl,
-          },
-          error: shot.ok ? undefined : shot.description,
-        });
-        pushToolLog({
+        // Browser only allows getDisplayMedia from a user click.
+        setScreenShare({
           id: action.id,
-          tool: action.tool,
-          args: action.args,
-          status: shot.ok ? "done" : "error",
-          detail: shot.description || (shot.ok ? "screenshot ok" : "failed"),
-          thumb: shot.ok ? shot.dataUrl : undefined,
+          reason: String(action.args.reason ?? ""),
         });
       }
     },
     [pushToolLog],
   );
+
+  const shareScreen = useCallback(async () => {
+    const capture = captureRef.current;
+    const pending = screenShare;
+    if (!capture || !pending) return;
+    setScreenShare(null);
+    const shot = await capture.captureScreenshot(pending.reason);
+    capture.sendToolResult(pending.id, {
+      ok: shot.ok,
+      result: {
+        ok: shot.ok,
+        description: shot.description,
+        width: shot.width,
+        height: shot.height,
+        dataUrl: shot.dataUrl,
+      },
+      error: shot.ok ? undefined : shot.description,
+    });
+    pushToolLog({
+      id: pending.id,
+      tool: "capture_screenshot",
+      args: { reason: pending.reason },
+      status: shot.ok ? "done" : "error",
+      detail: shot.description || (shot.ok ? "screenshot ok" : "failed"),
+      thumb: shot.ok ? shot.dataUrl : undefined,
+    });
+  }, [pushToolLog, screenShare]);
 
   const stop = useCallback(async () => {
     captureRef.current?.setPendingAskUser(null);
@@ -222,15 +250,16 @@ export function PresenceApp() {
     setConnected(false);
     setState("idle");
     setHitlPrompt(null);
+    setScreenShare(null);
     setToolLog([]);
   }, []);
 
   const start = useCallback(async () => {
     setError(null);
     setPartial("");
-    setTranscript("");
-    setAssistant("");
+    setMessages([]);
     setHitlPrompt(null);
+    setScreenShare(null);
     setToolLog([]);
 
     const prefs = loadPresenceSettings();
@@ -244,12 +273,46 @@ export function PresenceApp() {
         onState: setState,
         onPartial: setPartial,
         onTranscript: (t) => {
-          setTranscript(t);
+          const text = t.trim();
+          if (!text) return;
           setPartial("");
-          setAssistant("");
+          setMessages((prev) => [
+            ...prev,
+            { id: newTurnId("user"), role: "user", text },
+            { id: newTurnId("assistant"), role: "assistant", text: "" },
+          ]);
         },
         onAssistantText: (t) => {
-          setAssistant((prev) => (prev ? `${prev} ${t}` : t));
+          const chunk = t.trim();
+          if (!chunk) return;
+          setMessages((prev) => {
+            if (prev.length === 0) {
+              return [
+                {
+                  id: newTurnId("assistant"),
+                  role: "assistant",
+                  text: chunk,
+                },
+              ];
+            }
+            const copy = [...prev];
+            const last = copy[copy.length - 1]!;
+            if (last.role === "assistant") {
+              copy[copy.length - 1] = {
+                ...last,
+                text: last.text ? `${last.text} ${chunk}` : chunk,
+              };
+              return copy;
+            }
+            return [
+              ...copy,
+              {
+                id: newTurnId("assistant"),
+                role: "assistant",
+                text: chunk,
+              },
+            ];
+          });
         },
         onError: (msg) => {
           // Non-fatal client noise — log only
@@ -273,13 +336,30 @@ export function PresenceApp() {
           });
           setHitlPrompt(null);
           setAskAnswer("");
-          setTranscript(answer);
           setPartial("");
+          setMessages((prev) => [
+            ...prev,
+            { id: newTurnId("user"), role: "user", text: answer },
+          ]);
         },
         onHello: (info) => {
           setThreadId(info.threadId);
           setResourceId(info.resourceId);
           setServerInfo(info);
+          savePresenceThreadId(info.threadId);
+        },
+        onConversationHistory: (history) => {
+          setMessages(history);
+          setPartial("");
+        },
+        onSessionCleared: (info) => {
+          setThreadId(info.threadId);
+          setResourceId(info.resourceId);
+          savePresenceThreadId(info.threadId);
+          setMessages([]);
+          setPartial("");
+          setToolLog([]);
+          setHitlPrompt(null);
         },
         onListenArm: setListenArmed,
         onVideo: setVideoOn,
@@ -349,14 +429,16 @@ export function PresenceApp() {
     });
     setHitlPrompt(null);
     setAskAnswer("");
-    setTranscript(text);
     setPartial("");
+    setMessages((prev) => [
+      ...prev,
+      { id: newTurnId("user"), role: "user", text },
+    ]);
   }
 
   function sendText() {
     const text = textInput.trim();
     if (!text || !captureRef.current) return;
-    setAssistant("");
     // Typed reply while HITL is open → fulfill the tool
     if (hitlPrompt) {
       fulfillHitl(text);
@@ -468,6 +550,14 @@ export function PresenceApp() {
                 </>
               )}
             </Button>
+            <Button
+              variant="outline"
+              disabled={!running || !connected}
+              onClick={() => captureRef.current?.clearSession()}
+            >
+              <Eraser className="size-4" />
+              Clear chat
+            </Button>
           </div>
 
           <video
@@ -482,18 +572,7 @@ export function PresenceApp() {
 
           <Separator />
 
-          <div className="space-y-2 text-sm">
-            <p className="text-muted-foreground">You said</p>
-            <p className="min-h-6">
-              {transcript || partial || (
-                <span className="text-muted-foreground">—</span>
-              )}
-            </p>
-            <p className="text-muted-foreground">Hearsay</p>
-            <p className="min-h-6">
-              {assistant || <span className="text-muted-foreground">—</span>}
-            </p>
-          </div>
+          <ConversationLog messages={messages} partial={partial} />
 
           {toolLog.length > 0 ? (
             <div className="space-y-2 rounded-md border bg-muted/30 p-3 text-xs">
@@ -538,6 +617,24 @@ export function PresenceApp() {
                 ))}
               </ul>
             </div>
+          ) : null}
+
+          {screenShare ? (
+            <Card className="border-violet-500/40">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm">Share your screen</CardTitle>
+                <CardDescription>
+                  {screenShare.reason.trim() ||
+                    "Hearsay needs a look at the display."}{" "}
+                  The browser only opens the share picker from a click.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pb-3">
+                <Button onClick={() => void shareScreen()}>
+                  Choose screen or window
+                </Button>
+              </CardContent>
+            </Card>
           ) : null}
 
           {hitlPrompt?.kind === "ask_user" ? (

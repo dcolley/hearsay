@@ -15,8 +15,9 @@ Browser (web)  ──WebSocket──►  Perception service (mastra2 :4112)
 
 **Perception is a separate process** from Mastra Studio. Studio (`yarn dev`, `:4111`) serves agents and CopilotKit. Perception (`yarn perception`, `:4112`) is the long-lived WebSocket service for mic PCM, VAD, turn-yield, TTS, and client tools. Presence will not work if only Studio is running. `yarn dev:all` starts both.
 
-How we built it (decisions + code maps): **[LEARN.md](./LEARN.md)** — especially [two processes](LEARN.md#two-processes-one-product).  
-Architecture ADR: [docs/adr-002-laptop-web-perception.md](./docs/adr-002-laptop-web-perception.md).
+How we built it (decisions + code maps): **[LEARN.md](./LEARN.md)** — especially [two processes](LEARN.md#two-processes-one-product) and [Compared to Mastra + LiveKit](LEARN.md#compared-to-mastra--livekit).  
+Architecture ADR: [docs/adr-002-laptop-web-perception.md](./docs/adr-002-laptop-web-perception.md).  
+Essay: [Taking Mastra’s voice design further](./docs/articles/taking-mastra-voice-further.md).
 
 ## Packages
 
@@ -71,18 +72,25 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | Browser I/O, Node owns the loop | [LEARN — Browser is I/O](LEARN.md#browser-is-io-node-is-the-loop) |
 | Privacy: PCM/JPEG stay local | [LEARN — Browser is I/O](LEARN.md#browser-is-io-node-is-the-loop) |
 | Wire protocol (PCM + JSON) | [LEARN — Browser is I/O](LEARN.md#browser-is-io-node-is-the-loop) |
+| vs Mastra + LiveKit (same split, local audio) | [LEARN — Compared to LiveKit](LEARN.md#compared-to-mastra--livekit) · [article](docs/articles/taking-mastra-voice-further.md) |
 
 ### Voice & turn-taking
 
 | Topic | Start here |
 |-------|------------|
-| Presence UI (mic / transcript / HITL) | [LEARN — Presence UI](LEARN.md#presence-ui) |
+| Presence UI (mic / conversation scroll / HITL) | [LEARN — Presence UI](LEARN.md#presence-ui) |
+| Stable session thread + history hydrate | [LEARN — Memory](LEARN.md#memory) |
+| Clear chat (button + `clear_conversation`) | [LEARN — Clear conversation](LEARN.md#clear-conversation-tool) |
 | VAD vs barge-in (turn-yield cascade) | [LEARN — turn-yield](LEARN.md#vad-is-not-barge-in-turn-yield) |
 | Soft-pause then hard yield | [LEARN — turn-yield](LEARN.md#vad-is-not-barge-in-turn-yield) |
 | End of utterance (browser STT vs Whisper) | [LEARN — End of utterance](LEARN.md#end-of-utterance-listen-path) |
+| Incomplete-final hold (heuristic EOU) | [LEARN — Incomplete-final hold](LEARN.md#incomplete-final-hold) |
 | Streaming TTS by sentence | [LEARN — Streaming spoken replies](LEARN.md#streaming-spoken-replies) |
 | Progress speech while tools run (ADR-003) | [LEARN — Progress speech](LEARN.md#progress-speech-talks-while-it-works) |
 | Listen-arm after playback | [LEARN — Listen-arm after TTS](LEARN.md#listen-arm-after-tts) |
+| Spoken tool latency fillers | [LEARN — Tool fillers](LEARN.md#spoken-tool-latency-fillers) |
+| Heard-only interrupt memory | [LEARN — Heard-only interrupt](LEARN.md#heard-only-interrupt-memory) |
+| Generation vs speech metrics | [LEARN — Generation vs speech](LEARN.md#generation-vs-speech) |
 
 ### Speaker duplex (the hard part)
 
@@ -119,6 +127,9 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | Topic | Start here |
 |-------|------------|
 | System voice vs Kokoro vs HTTP sidecar | [LEARN — TTS engines](LEARN.md#tts-engines) |
+| Pocket TTS built-in voices | [LEARN — Pocket built-in voices](LEARN.md#pocket-built-in-voices) |
+| Voice clone modal (separate from engine pick) | [LEARN — Voice clone](LEARN.md#voice-clone-separate-from-choosing-pocket) |
+| Where clone / model data is stored | [LEARN — Where voice data lives](LEARN.md#where-voice-data-lives) |
 | Only blob/PCM engines get acoustic AEC | [LEARN — AEC sink](LEARN.md#engine-agnostic-aec-sink) |
 
 ### Stretch goals (not implemented)
@@ -127,10 +138,11 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 |-------|----------------------|
 | Single-port Studio + perception | Ops simplicity — [notes](LEARN.md#what-we-consciously-did-not-build) |
 | Software AEC3 / residual metrics | Harder than loopback AEC |
-| Prosody / LM endpointing | Better EOU than silence alone |
-| Speculative ASR | Lower utterance→reply latency |
+| Prosody / LM / semantic endpointing | Better EOU than heuristic incomplete-hold |
+| Speculative reply before EOU | Lower utterance→reply latency (memory pitfalls) |
 | Continuous screen share | Observe without re-picking a window |
 | Click/type desktop control | Screenshot is observe-only today |
+| LiveKit runtime | Patterns only — keep audio local |
 
 Suggested reading order: [LEARN — Suggested reading order](LEARN.md#suggested-reading-order).
 

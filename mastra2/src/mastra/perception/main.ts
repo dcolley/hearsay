@@ -32,7 +32,7 @@ const visionEnabled =
 const progressEnabled =
   (process.env.PROGRESS_ENABLED ?? "true").toLowerCase() !== "false";
 
-async function createSession() {
+async function createSession(opts?: { threadId?: string }) {
   return new PerceptionSession({
     agent: hearsayAgent,
     memory: hearsayMemory,
@@ -48,6 +48,7 @@ async function createSession() {
     sustainMs,
     resourceId: hearsayResourceId,
     progress: { enabled: progressEnabled },
+    threadId: opts?.threadId,
   });
 }
 

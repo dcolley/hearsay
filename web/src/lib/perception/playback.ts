@@ -1,7 +1,12 @@
 import { synthesizeKokoroUrl } from "./kokoro-tts";
 import {
+  stopPocketGenerate,
+  synthesizePocketUrl,
+} from "./pocket-tts";
+import {
   loadPresenceSettings,
   type BrowserTtsEngine,
+  type PocketOutputSource,
 } from "./presence-settings";
 import { WebrtcAecPlayback } from "./webrtc-aec-playback";
 
@@ -29,7 +34,11 @@ export class TtsPlayback {
   private speechRate = 1;
   private browserTtsEngine: BrowserTtsEngine = "speechSynthesis";
   private kokoroVoice = "af_heart";
+  private pocketBuiltinVoice = "alba";
+  private pocketOutputSource: PocketOutputSource = "builtin";
+  private pocketClonedVoiceId = "";
   private kokoroFailNotified = false;
+  private pocketFailNotified = false;
   /** Captions for STT echo filter — all engines append here. */
   private spokenText = "";
   /** Keep captions after playback so trailing STT of last words still matches. */
@@ -49,6 +58,9 @@ export class TtsPlayback {
     this.speechRate = s.speechRate;
     this.browserTtsEngine = s.browserTtsEngine;
     this.kokoroVoice = s.kokoroVoice;
+    this.pocketBuiltinVoice = s.pocketBuiltinVoice;
+    this.pocketOutputSource = s.pocketOutputSource;
+    this.pocketClonedVoiceId = s.pocketClonedVoiceId;
   }
 
   setOnDone(cb: (() => void) | undefined): void {
@@ -130,6 +142,7 @@ export class TtsPlayback {
     this.spokenText = "";
     this.aec.stop();
     this.stopDirectAudio();
+    void stopPocketGenerate();
     if (typeof window !== "undefined") {
       window.speechSynthesis.cancel();
     }
@@ -263,6 +276,8 @@ export class TtsPlayback {
       const line = this.textQueue.shift()!;
       if (this.browserTtsEngine === "kokoro") {
         await this.speakKokoroLine(line, gen);
+      } else if (this.browserTtsEngine === "pocket") {
+        await this.speakPocketLine(line, gen);
       } else {
         await this.speakLine(line, gen);
       }
@@ -298,6 +313,43 @@ export class TtsPlayback {
         this.kokoroFailNotified = true;
         console.warn(
           `Kokoro TTS failed (${message}) — falling back to system voice`,
+        );
+      }
+      await this.speakLine(text, gen);
+    }
+  }
+
+  private async speakPocketLine(text: string, gen: number): Promise<void> {
+    if (gen !== this.generation) return;
+    try {
+      const url = await synthesizePocketUrl(text, {
+        outputSource: this.pocketOutputSource,
+        builtinVoice: this.pocketBuiltinVoice,
+        clonedVoiceId: this.pocketClonedVoiceId,
+      });
+      if (gen !== this.generation) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      this.drainingAudio = true;
+      try {
+        await this.aec.playUrl(url);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[playback] AEC play failed (${message}) — direct fallback`);
+        await this.playUrlDirect(url, gen);
+      }
+      URL.revokeObjectURL(url);
+      this.drainingAudio = false;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!this.pocketFailNotified) {
+        this.pocketFailNotified = true;
+        console.warn(
+          `Pocket TTS failed (${message}) — falling back to system voice`,
+        );
+        this.onError?.(
+          `Pocket TTS failed (${message}) — using system voice`,
         );
       }
       await this.speakLine(text, gen);

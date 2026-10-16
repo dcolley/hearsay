@@ -5,7 +5,11 @@ const nextConfig: NextConfig = {
   partialPrefetching: true,
   // Keep Node-only ONNX bindings out of the browser bundle
   serverExternalPackages: ["onnxruntime-node", "sharp"],
-  transpilePackages: ["kokoro-js", "@huggingface/transformers"],
+  transpilePackages: [
+    "kokoro-js",
+    "@huggingface/transformers",
+    "pocket-tts-js",
+  ],
   turbopack: {
     rules: {
       "*.css": {

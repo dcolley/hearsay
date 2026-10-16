@@ -43,7 +43,8 @@ Home page talks to `hearsayAgent` over AG-UI. Frontend tools: `ask_user` (HITL),
 6. **TTS options** (with `TTS_MODE=browser` on the server):
    - **System voice** — SpeechSynthesis (default; no acoustic AEC — text echo filter only)
    - **Kokoro in-browser** — Presence Settings → neural on-device TTS via [`kokoro-js`](https://www.npmjs.com/package/kokoro-js) (same stack as [kokoroweb.app](https://kokoroweb.app/)); first load downloads model weights
-   - **HTTP sidecar** — `TTS_MODE=http` + Kokoro FastAPI on `TTS_URL` (browser plays MP3)
+   - **Pocket TTS** — built-in Kyutai voices via [`pocket-tts-js`](https://www.npmjs.com/package/pocket-tts-js); optional **Clone a voice…** modal (record/upload → IndexedDB). See root [LEARN.md](../LEARN.md#tts-engines).
+   - **HTTP sidecar** — `TTS_MODE=http` + Kokoro FastAPI on `TTS_URL` (browser plays MP3; client Pocket/Kokoro prefs ignored)
 
    Any blob/PCM audio through the Presence audio queue plays via a WebRTC loopback sink so browser AEC can cancel it on speakers. `speechSynthesis` cannot expose samples — it updates the spoken-text buffer and relies on the STT echo filter. With `BARGE_IN_ENABLED=true`, expect occasional `stt_echo_ignored` logs rather than self-cuts.
 

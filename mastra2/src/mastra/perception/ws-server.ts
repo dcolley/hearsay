@@ -1,5 +1,5 @@
 import { WebSocketServer, type WebSocket } from "ws";
-import type { PerceptionSession } from "./session.ts";
+import { isThreadId, type PerceptionSession } from "./session.ts";
 import {
   parsePcmBinary,
   type ClientControlMessage,
@@ -8,7 +8,9 @@ import {
 
 export type PerceptionWsOptions = {
   port: number;
-  createSession: () => PerceptionSession | Promise<PerceptionSession>;
+  createSession: (opts?: {
+    threadId?: string;
+  }) => PerceptionSession | Promise<PerceptionSession>;
   halfDuplex: boolean;
   bargeInEnabled?: boolean;
   asrMode?: string;
@@ -98,6 +100,21 @@ function wireSession(ws: WebSocket, session: PerceptionSession): () => void {
     session.bus.on("barge_resume", ({ t_ms }) => {
       sendJson(ws, { type: "barge_resume", t_ms });
     }),
+    session.bus.on("conversation_history", ({ messages }) => {
+      sendJson(ws, {
+        type: "conversation_history",
+        t_ms: Date.now(),
+        messages,
+      });
+    }),
+    session.bus.on("session_cleared", ({ threadId, resourceId }) => {
+      sendJson(ws, {
+        type: "session_cleared",
+        t_ms: Date.now(),
+        threadId,
+        resourceId,
+      });
+    }),
     session.bus.on("error", ({ error }) => {
       sendJson(ws, { type: "error", t_ms: Date.now(), error });
     }),
@@ -108,6 +125,8 @@ function wireSession(ws: WebSocket, session: PerceptionSession): () => void {
     session.setClientActionSender(null);
   };
 }
+
+const HELLO_WAIT_MS = 8_000;
 
 export function startPerceptionWsServer(
   opts: PerceptionWsOptions,
@@ -120,32 +139,101 @@ export function startPerceptionWsServer(
     let unwire: (() => void) | null = null;
     let audioInFlight = false;
     let closed = false;
+    let ready = false;
+    const earlyQueue: ClientControlMessage[] = [];
 
-    void (async () => {
-      try {
-        session = await Promise.resolve(opts.createSession());
-        if (closed) {
-          session.reset();
-          return;
+    const boot = (preferredThreadId?: string) => {
+      if (ready || closed) return;
+      ready = true;
+      void (async () => {
+        try {
+          session = await Promise.resolve(
+            opts.createSession(
+              isThreadId(preferredThreadId)
+                ? { threadId: preferredThreadId }
+                : undefined,
+            ),
+          );
+          if (closed) {
+            session.reset();
+            return;
+          }
+          unwire = wireSession(ws, session);
+          await session.init();
+          sendJson(ws, helloAck(opts, session));
+          sendJson(ws, {
+            type: "state",
+            t_ms: Date.now(),
+            state: session.getState(),
+          });
+          // Replay any control messages that arrived during boot
+          for (const msg of earlyQueue) {
+            handleControl(msg);
+          }
+          earlyQueue.length = 0;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          sendJson(ws, { type: "error", t_ms: Date.now(), error: message });
+          ws.close();
         }
-        unwire = wireSession(ws, session);
-        sendJson(ws, helloAck(opts, session));
-        sendJson(ws, {
-          type: "state",
-          t_ms: Date.now(),
-          state: session.getState(),
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        sendJson(ws, { type: "error", t_ms: Date.now(), error: message });
-        ws.close();
+      })();
+    };
+
+    const helloTimer = setTimeout(() => boot(), HELLO_WAIT_MS);
+
+    const handleControl = (msg: ClientControlMessage): void => {
+      if (!session) return;
+      switch (msg.type) {
+        case "hello":
+          sendJson(ws, helloAck(opts, session));
+          break;
+        case "ping":
+          sendJson(ws, { type: "pong", t_ms: msg.t_ms });
+          break;
+        case "speech_start":
+          session.onSpeechStart(msg.t_ms);
+          break;
+        case "barge_in":
+          session.onBargeInRequest(msg.t_ms);
+          break;
+        case "playback_done":
+          session.onPlaybackDone(msg.t_ms);
+          break;
+        case "text_utterance":
+          session.onTextUtterance(msg.text, msg.t_ms);
+          break;
+        case "clear_session":
+          void session.clearConversation().catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            sendJson(ws, { type: "error", t_ms: Date.now(), error: message });
+          });
+          break;
+        case "frame":
+          void session.onFrame({
+            t_ms: msg.t_ms,
+            dataUrl: msg.dataUrl,
+            width: msg.width,
+            height: msg.height,
+            description: msg.description,
+          });
+          break;
+        case "tool_result":
+          session.onToolResult({
+            id: msg.id,
+            ok: msg.ok,
+            result: msg.result,
+            error: msg.error,
+          });
+          break;
+        default:
+          break;
       }
-    })();
+    };
 
     ws.on("message", (data, isBinary) => {
-      if (!session) return;
       try {
         if (isBinary) {
+          if (!session) return;
           if (audioInFlight) return;
           const buf = Buffer.isBuffer(data)
             ? data
@@ -168,45 +256,17 @@ export function startPerceptionWsServer(
         const raw = typeof data === "string" ? data : data.toString("utf8");
         const msg = JSON.parse(raw) as ClientControlMessage;
 
-        switch (msg.type) {
-          case "hello":
-            sendJson(ws, helloAck(opts, session));
-            break;
-          case "ping":
-            sendJson(ws, { type: "pong", t_ms: msg.t_ms });
-            break;
-          case "speech_start":
-            session.onSpeechStart(msg.t_ms);
-            break;
-          case "barge_in":
-            session.onBargeInRequest(msg.t_ms);
-            break;
-          case "playback_done":
-            session.onPlaybackDone(msg.t_ms);
-            break;
-          case "text_utterance":
-            session.onTextUtterance(msg.text, msg.t_ms);
-            break;
-          case "frame":
-            void session.onFrame({
-              t_ms: msg.t_ms,
-              dataUrl: msg.dataUrl,
-              width: msg.width,
-              height: msg.height,
-              description: msg.description,
-            });
-            break;
-          case "tool_result":
-            session.onToolResult({
-              id: msg.id,
-              ok: msg.ok,
-              result: msg.result,
-              error: msg.error,
-            });
-            break;
-          default:
-            break;
+        if (!ready) {
+          if (msg.type === "hello") {
+            clearTimeout(helloTimer);
+            boot(msg.threadId);
+          } else {
+            earlyQueue.push(msg);
+          }
+          return;
         }
+
+        handleControl(msg);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         sendJson(ws, { type: "error", t_ms: Date.now(), error: message });
@@ -215,6 +275,7 @@ export function startPerceptionWsServer(
 
     ws.on("close", () => {
       closed = true;
+      clearTimeout(helloTimer);
       unwire?.();
       session?.reset();
     });

@@ -6,6 +6,12 @@ export type AgentState =
   | "interrupted"
   | "awaiting_user";
 
+export type ConversationTurn = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+};
+
 export type ServerHelloInfo = {
   threadId: string;
   resourceId: string;
@@ -48,6 +54,17 @@ export type ServerMessage =
       type: "hello_ack";
       t_ms: number;
     } & ServerHelloInfo)
+  | {
+      type: "conversation_history";
+      t_ms: number;
+      messages: ConversationTurn[];
+    }
+  | {
+      type: "session_cleared";
+      t_ms: number;
+      threadId: string;
+      resourceId: string;
+    }
   | {
       type: "client.action";
       t_ms: number;

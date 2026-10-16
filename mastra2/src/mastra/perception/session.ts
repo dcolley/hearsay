@@ -5,6 +5,9 @@ import type { Memory } from "@mastra/memory";
 import { randomUUID } from "node:crypto";
 import { hearsayResourceId } from "../memory/hearsay-memory.ts";
 import { mergeFrameIntoWorkingMemory } from "../memory/merge-scene.ts";
+import {
+  emptySceneWorkingMemory,
+} from "../memory/scene-schema.ts";
 import type { AsrAdapter } from "./asr.ts";
 import { EventBus, type PerceptionEvents } from "./bus.ts";
 import {
@@ -19,9 +22,14 @@ import {
   needsLiveVision,
   needsScreenshot,
 } from "./describe-frame.ts";
+import {
+  INCOMPLETE_UTTERANCE_HOLD_MS,
+  looksIncompleteUtterance,
+} from "./incomplete-utterance.ts";
 import { toSpokenReply } from "./reply-text.ts";
 import { firstCompleteSentence } from "./sentences.ts";
 import { ProgressNarrator } from "./progress.ts";
+import { toolFillerPhrase } from "./tool-fillers.ts";
 import type { TurnAdapter } from "./turn.ts";
 import {
   createTurnYieldAdapter,
@@ -31,11 +39,19 @@ import type { TtsAdapter } from "./tts.ts";
 import {
   emptyScene,
   type AgentState,
+  type ConversationTurn,
   type PcmFrame,
   type SceneMemory,
 } from "./types.ts";
 import { SustainedSpeechGate, type VadAdapter } from "./vad.ts";
 import type { VisionAdapter } from "./vision.ts";
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isThreadId(value: string | undefined | null): value is string {
+  return typeof value === "string" && UUID_RE.test(value.trim());
+}
 
 export type SessionDeps = {
   agent: Agent;
@@ -48,6 +64,8 @@ export type SessionDeps = {
   halfDuplex?: boolean;
   bargeInEnabled?: boolean;
   resourceId?: string;
+  /** Resume this Mastra thread when valid; otherwise mint a new id. */
+  threadId?: string;
   /** Post-TTS deaf window before VAD can open a turn (US30). */
   listenArmMs?: number;
   /** Sustained speech before listen-start / barge-in (US17/US20). */
@@ -80,8 +98,12 @@ const PLAYBACK_DONE_TIMEOUT_MS = 45_000;
 export class PerceptionSession {
   readonly bus = new EventBus<PerceptionEvents>();
   readonly bridge = new ClientBridge();
-  readonly threadId: string;
+  private _threadId: string;
   readonly resourceId: string;
+
+  get threadId(): string {
+    return this._threadId;
+  }
 
   private state: AgentState = "idle";
   private scene: SceneMemory = emptyScene();
@@ -142,6 +164,18 @@ export class PerceptionSession {
    * Hard interrupt during speaking remains STT non-echo (client).
    */
   private playbackOpen = false;
+  /** Avoid duplicate speech_complete when barge and playback_done both fire. */
+  private speechCompleteLogged = false;
+  /**
+   * Text the user actually heard before barge-in (for heard-only memory).
+   * Cleared after persist attempt.
+   */
+  private interruptHeard: string | null = null;
+  /** Debounce incomplete browser-STT finals before commit. */
+  private incompleteHold?: {
+    text: string;
+    timer: ReturnType<typeof setTimeout>;
+  };
 
   constructor(private readonly deps: SessionDeps) {
     this.halfDuplex = deps.halfDuplex ?? true;
@@ -166,8 +200,163 @@ export class PerceptionSession {
     this.turnYield =
       deps.turnYield ?? createTurnYieldAdapter({ sustainMs });
     this.scene = deps.vision.getScene();
-    this.threadId = randomUUID();
+    this._threadId = isThreadId(deps.threadId) ? deps.threadId.trim() : randomUUID();
     this.resourceId = deps.resourceId || hearsayResourceId;
+  }
+
+  /**
+   * Ensure the Mastra thread exists and push conversation_history to the client.
+   * Call once after WS wiring so history subscribers are attached.
+   */
+  async init(): Promise<void> {
+    await this.ensureThread(this._threadId);
+    await this.emitConversationHistory();
+  }
+
+  private async ensureThread(threadId: string): Promise<void> {
+    try {
+      const existing = await this.deps.memory.getThreadById({
+        threadId,
+        resourceId: this.resourceId,
+      });
+      if (existing) {
+        this._threadId = threadId;
+        return;
+      }
+      await this.deps.memory.createThread({
+        threadId,
+        resourceId: this.resourceId,
+        title: "Presence",
+      });
+      this._threadId = threadId;
+    } catch (err) {
+      console.warn(
+        "[perception] ensureThread failed:",
+        err instanceof Error ? err.message : err,
+      );
+      // Fall back to a fresh id if the preferred one cannot be created
+      if (threadId !== this._threadId) {
+        this._threadId = randomUUID();
+      }
+      try {
+        await this.deps.memory.createThread({
+          threadId: this._threadId,
+          resourceId: this.resourceId,
+          title: "Presence",
+        });
+      } catch (err2) {
+        console.warn(
+          "[perception] createThread fallback failed:",
+          err2 instanceof Error ? err2.message : err2,
+        );
+      }
+    }
+  }
+
+  private async emitConversationHistory(): Promise<void> {
+    try {
+      const recalled = await this.deps.memory.recall({
+        threadId: this._threadId,
+        resourceId: this.resourceId,
+        perPage: 24,
+      });
+      const messages: ConversationTurn[] = [];
+      for (const m of recalled.messages) {
+        if (m.role !== "user" && m.role !== "assistant") continue;
+        const text = assistantPlainText(m);
+        if (!text) continue;
+        messages.push({ id: m.id, role: m.role, text });
+      }
+      this.bus.emit("conversation_history", { messages });
+    } catch (err) {
+      console.warn(
+        "[perception] conversation history failed:",
+        err instanceof Error ? err.message : err,
+      );
+      this.bus.emit("conversation_history", { messages: [] });
+    }
+  }
+
+  /**
+   * Wipe the current thread, mint a new one, clear scene working memory.
+   * Used by the clear_conversation tool and client clear_session control.
+   */
+  async clearConversation(): Promise<{ threadId: string; resourceId: string }> {
+    this.clearIncompleteHold();
+    this.deps.tts.stop();
+    this.turnAbort?.abort();
+    // Fresh controller so we can speak a short confirmation after the wipe
+    this.turnAbort = new AbortController();
+    this.thinking = false;
+    this.playbackOpen = false;
+    this.speechCompleteLogged = false;
+    this.partialSpoken = "";
+    this.interruptHeard = null;
+    this.utterance = "";
+    this.partial = "";
+    if (this.playbackDoneWaiter) {
+      clearTimeout(this.playbackDoneWaiter.timer);
+      this.playbackDoneWaiter.resolve();
+      this.playbackDoneWaiter = undefined;
+    }
+    this.turnYield.reset();
+    this.deps.turn.reset();
+    this.deps.vad.reset();
+    this.deps.asr.reset();
+    this.deps.vision.reset();
+    this.scene = emptyScene();
+    this.bridge.clear();
+
+    const oldThreadId = this._threadId;
+    try {
+      await this.deps.memory.deleteThread(oldThreadId);
+    } catch (err) {
+      console.warn(
+        "[perception] deleteThread:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    this._threadId = randomUUID();
+    await this.ensureThread(this._threadId);
+
+    try {
+      await this.deps.memory.updateWorkingMemory({
+        threadId: this._threadId,
+        resourceId: this.resourceId,
+        workingMemory: JSON.stringify(emptySceneWorkingMemory()),
+      });
+    } catch (err) {
+      console.warn(
+        "[perception] clear working memory:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    this.metric("conversation_cleared", this.clientNow(), {
+      old_thread: oldThreadId.slice(0, 8),
+    });
+    this.bus.emit("session_cleared", {
+      threadId: this._threadId,
+      resourceId: this.resourceId,
+    });
+    this.bus.emit("conversation_history", { messages: [] });
+
+    // Fixed confirmation — model turn was aborted when clearing mid-stream
+    try {
+      await this.speakFragment("Okay, starting fresh.");
+      this.bus.emit("tts_flush", { t_ms: this.clientNow() });
+      await this.waitForPlaybackDone();
+    } catch (err) {
+      console.warn(
+        "[perception] clear confirmation speak failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    this.beginListenArm(this.clientNow());
+    this.setState("listening");
+    return { threadId: this._threadId, resourceId: this.resourceId };
   }
 
   /** Prefer client media clock; fall back to last seen frame time. */
@@ -291,6 +480,7 @@ export class PerceptionSession {
 
     // Spoken answer to an in-flight ask_user — resume the agent tool, don't barge
     if (this.bridge.resolveAskUserAnswer(trimmed)) {
+      this.clearIncompleteHold();
       console.log(
         `[perception] ask_user answered by voice: ${JSON.stringify(trimmed).slice(0, 80)}`,
       );
@@ -310,6 +500,7 @@ export class PerceptionSession {
         return;
       }
       // Browser STT heard the interrupt — hard yield then treat as new turn
+      this.clearIncompleteHold();
       this.metric("stt_interrupt", t_ms);
       this.bargeIn(t_ms);
     } else if (!this.isListenArmed(t_ms)) {
@@ -320,6 +511,37 @@ export class PerceptionSession {
       return;
     }
 
+    // Incomplete-looking finals: wait briefly for a longer final before commit
+    if (!busy && looksIncompleteUtterance(trimmed)) {
+      this.scheduleIncompleteHold(trimmed, t_ms);
+      return;
+    }
+    this.clearIncompleteHold();
+    this.commitTextUtterance(trimmed, t_ms);
+  }
+
+  private scheduleIncompleteHold(text: string, t_ms: number): void {
+    this.clearIncompleteHold();
+    this.metric("incomplete_hold", t_ms, { chars: text.length });
+    console.log(
+      `[perception] incomplete_hold ${JSON.stringify(text).slice(0, 80)}`,
+    );
+    this.incompleteHold = {
+      text,
+      timer: setTimeout(() => {
+        this.incompleteHold = undefined;
+        this.commitTextUtterance(text, this.clientNow());
+      }, INCOMPLETE_UTTERANCE_HOLD_MS),
+    };
+  }
+
+  private clearIncompleteHold(): void {
+    if (!this.incompleteHold) return;
+    clearTimeout(this.incompleteHold.timer);
+    this.incompleteHold = undefined;
+  }
+
+  private commitTextUtterance(trimmed: string, t_ms: number): void {
     this.pcmChunks = [];
     this.pcmSamples = 0;
     this.deps.turn.reset();
@@ -343,13 +565,19 @@ export class PerceptionSession {
   /** Client finished draining TTS queue — re-arm listen after LISTEN_ARM_MS. */
   onPlaybackDone(t_ms: number): void {
     this.playbackOpen = false;
+    this.logSpeechComplete(this.clientNow(t_ms), false);
     if (this.playbackDoneWaiter) {
       clearTimeout(this.playbackDoneWaiter.timer);
       const { resolve } = this.playbackDoneWaiter;
       this.playbackDoneWaiter = undefined;
       resolve();
     }
-    void t_ms;
+  }
+
+  private logSpeechComplete(t_ms: number, interrupted: boolean): void {
+    if (this.speechCompleteLogged) return;
+    this.speechCompleteLogged = true;
+    this.metric("speech_complete", t_ms, { interrupted });
   }
 
   async onFrame(input: {
@@ -460,6 +688,15 @@ export class PerceptionSession {
     ) {
       return;
     }
+    this.clearIncompleteHold();
+    const heard = this.partialSpoken.trim();
+    this.interruptHeard = heard || null;
+    if (heard) {
+      this.metric("interrupt_heard_chars", t_ms, { chars: heard.length });
+    }
+    if (this.playbackOpen) {
+      this.logSpeechComplete(t_ms, true);
+    }
     this.playbackOpen = false;
     this.softBargePaused = false;
     this.softBargeAt = null;
@@ -524,6 +761,7 @@ export class PerceptionSession {
       }
       const timer = setTimeout(() => {
         this.playbackOpen = false;
+        this.logSpeechComplete(this.clientNow(), false);
         this.playbackDoneWaiter = undefined;
         resolve();
       }, PLAYBACK_DONE_TIMEOUT_MS);
@@ -632,6 +870,7 @@ export class PerceptionSession {
 
     const requestContext = new RequestContext();
     requestContext.set("clientBridge", this.bridge);
+    requestContext.set("clearConversation", () => this.clearConversation());
 
     // Ground visual questions before the agent answers (Spark chat cannot see
     // tool-result images). Screen/UI → screenshot; physical scene → webcam.
@@ -639,7 +878,7 @@ export class PerceptionSession {
     if (needsScreenshot(this.utterance)) {
       const grounded = await this.captureAndDescribeScreen(this.utterance);
       if (grounded) {
-        userContent = `${this.utterance}\n\n[Live screen — trust this over memory or earlier guesses]: ${grounded}`;
+        userContent = `${this.utterance}\n\n[Live screen — trust this over memory or earlier guesses]: ${grounded}\n\nDo not call capture_screenshot again this turn; the display is already described above.`;
       } else {
         userContent = `${this.utterance}\n\n[Screen capture unavailable or cancelled. Ask the user to allow screen/window share, or say you cannot see the display. Do not invent UI.]`;
       }
@@ -660,6 +899,7 @@ export class PerceptionSession {
     let rawBuf = "";
     let spokenOffset = 0;
     let spoke = false;
+    const fillersSpoken = new Set<string>();
 
     const flushSpeakable = async (forceRest: boolean): Promise<void> => {
       const spoken = toSpokenReply(rawBuf);
@@ -747,15 +987,36 @@ export class PerceptionSession {
           chunk.type === "tool-result"
         ) {
           const payload = chunk.payload as { toolName?: string };
-          console.log(
-            `[perception] ${chunk.type}: ${payload?.toolName ?? "?"}`
-          );
+          const toolName = payload?.toolName ?? "?";
+          console.log(`[perception] ${chunk.type}: ${toolName}`);
           if (chunk.type === "tool-call") {
-            const line = narrator.onToolStart(payload?.toolName ?? "");
-            if (line) this.enqueueSpeak(line);
+            // ADR-003 owns known tools. Local fillers cover names the
+            // narrator does not (and stay silent when a progress line fires).
+            const line = narrator.onToolStart(toolName === "?" ? "" : toolName);
+            if (line) {
+              this.enqueueSpeak(line);
+            } else {
+              const filler = toolFillerPhrase(
+                toolName === "?" ? undefined : toolName,
+              );
+              if (filler && !fillersSpoken.has(toolName)) {
+                fillersSpoken.add(toolName);
+                this.metric("tool_filler_spoken", this.clientNow(), {
+                  tool: toolName,
+                });
+                this.enqueueSpeak(filler);
+                spoke = true;
+              }
+            }
           }
         }
       }
+
+      const genAt = this.clientNow();
+      this.metric("generation_complete", genAt, {
+        aborted: this.turnAbort.signal.aborted,
+        spoke,
+      });
 
       if (!this.turnAbort.signal.aborted) {
         await flushSpeakable(true);
@@ -777,9 +1038,12 @@ export class PerceptionSession {
           this.beginListenArm(now);
           this.setState("listening");
         }
+      } else {
+        await this.persistHeardOnlyInterrupt();
       }
     } catch (err) {
       if (this.turnAbort.signal.aborted) {
+        await this.persistHeardOnlyInterrupt();
         this.beginListenArm(this.clientNow());
         this.setState("listening");
       } else {
@@ -791,6 +1055,84 @@ export class PerceptionSession {
     } finally {
       if (progressTimer) clearInterval(progressTimer);
       this.thinking = false;
+    }
+  }
+
+  /**
+   * After barge-in: keep memory aligned with what the user actually heard,
+   * not the full (unspoken) assistant generation.
+   */
+  private async persistHeardOnlyInterrupt(): Promise<void> {
+    const heard = this.interruptHeard?.trim() ?? "";
+    this.interruptHeard = null;
+    if (!heard) return;
+
+    try {
+      const recalled = await this.deps.memory.recall({
+        threadId: this.threadId,
+        resourceId: this.resourceId,
+        perPage: 12,
+      });
+      const lastAssistant = [...recalled.messages]
+        .reverse()
+        .find((m) => m.role === "assistant");
+
+      if (lastAssistant) {
+        const existing = assistantPlainText(lastAssistant);
+        if (
+          existing &&
+          existing.length > heard.length &&
+          (existing.startsWith(heard.slice(0, Math.min(48, heard.length))) ||
+            heard.startsWith(existing.slice(0, Math.min(48, existing.length))))
+        ) {
+          await this.deps.memory.updateMessages({
+            messages: [
+              {
+                id: lastAssistant.id,
+                content: {
+                  format: 2,
+                  parts: [{ type: "text", text: heard }],
+                  content: heard,
+                },
+              },
+            ],
+          });
+          console.log(
+            `[perception] interrupt memory truncated to ${heard.length} chars`,
+          );
+          return;
+        }
+      }
+
+      await this.deps.memory.saveMessages({
+        messages: [
+          {
+            id: randomUUID(),
+            role: "user",
+            threadId: this.threadId,
+            resourceId: this.resourceId,
+            createdAt: new Date(),
+            content: {
+              format: 2,
+              parts: [
+                {
+                  type: "text",
+                  text: `[Interrupted — only this was spoken]: ${heard}`,
+                },
+              ],
+              content: `[Interrupted — only this was spoken]: ${heard}`,
+            },
+          },
+        ],
+      });
+      console.log(
+        `[perception] interrupt memory note saved (${heard.length} chars)`,
+      );
+    } catch (err) {
+      console.warn(
+        "[perception] heard-only memory failed:",
+        err instanceof Error ? err.message : err,
+      );
     }
   }
 
@@ -899,6 +1241,9 @@ export class PerceptionSession {
   private async speakFragment(text: string): Promise<void> {
     if (this.turnAbort?.signal.aborted) return;
     this.setState("speaking");
+    if (!this.playbackOpen) {
+      this.speechCompleteLogged = false;
+    }
     this.playbackOpen = true;
     // Echo floor in client media clock (same base as PCM frame.t_ms)
     const now = this.clientNow();
@@ -936,12 +1281,15 @@ export class PerceptionSession {
     this.deps.asr.reset();
     this.deps.vision.reset();
     this.bridge.clear();
+    this.clearIncompleteHold();
     if (this.listenArmTimer) clearTimeout(this.listenArmTimer);
     if (this.playbackDoneWaiter) {
       clearTimeout(this.playbackDoneWaiter.timer);
       this.playbackDoneWaiter = undefined;
     }
     this.playbackOpen = false;
+    this.speechCompleteLogged = false;
+    this.interruptHeard = null;
     this.pcmChunks = [];
     this.pcmSamples = 0;
     this.wasSpeech = false;
@@ -959,6 +1307,22 @@ export class PerceptionSession {
     this.utteranceOpened = false;
     this.setState("idle");
   }
+}
+
+/** Flatten assistant message parts to plain text for interrupt truncation. */
+function assistantPlainText(message: {
+  content?: { parts?: Array<{ type?: string; text?: string }>; content?: string };
+}): string {
+  const parts = message.content?.parts;
+  if (Array.isArray(parts)) {
+    return parts
+      .filter((p) => p?.type === "text" && typeof p.text === "string")
+      .map((p) => p.text as string)
+      .join("")
+      .trim();
+  }
+  const c = message.content?.content;
+  return typeof c === "string" ? c.trim() : "";
 }
 
 /** User is asking for a pick-list / menu — force offer_choices tool. */

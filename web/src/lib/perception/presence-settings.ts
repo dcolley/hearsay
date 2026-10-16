@@ -1,6 +1,7 @@
 const STORAGE_KEY = "hearsay.presence.settings";
 
-export type BrowserTtsEngine = "speechSynthesis" | "kokoro";
+export type BrowserTtsEngine = "speechSynthesis" | "kokoro" | "pocket";
+export type PocketOutputSource = "builtin" | "cloned";
 
 export type PresenceSettings = {
   wsUrl: string;
@@ -8,6 +9,9 @@ export type PresenceSettings = {
   speechRate: number;
   browserTtsEngine: BrowserTtsEngine;
   kokoroVoice: string;
+  pocketBuiltinVoice: string;
+  pocketOutputSource: PocketOutputSource;
+  pocketClonedVoiceId: string;
   autoStartVideo: boolean;
 };
 
@@ -20,8 +24,22 @@ export const DEFAULT_PRESENCE_SETTINGS: PresenceSettings = {
   speechRate: 1,
   browserTtsEngine: "speechSynthesis",
   kokoroVoice: "af_heart",
+  pocketBuiltinVoice: "alba",
+  pocketOutputSource: "builtin",
+  pocketClonedVoiceId: "",
   autoStartVideo: false,
 };
+
+function parseEngine(raw: unknown): BrowserTtsEngine {
+  if (raw === "kokoro" || raw === "pocket" || raw === "speechSynthesis") {
+    return raw;
+  }
+  return "speechSynthesis";
+}
+
+function parseOutputSource(raw: unknown): PocketOutputSource {
+  return raw === "cloned" ? "cloned" : "builtin";
+}
 
 export function loadPresenceSettings(): PresenceSettings {
   if (typeof window === "undefined") return { ...DEFAULT_PRESENCE_SETTINGS };
@@ -29,16 +47,19 @@ export function loadPresenceSettings(): PresenceSettings {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_PRESENCE_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<PresenceSettings>;
-    const engine =
-      parsed.browserTtsEngine === "kokoro" ? "kokoro" : "speechSynthesis";
     return {
       ...DEFAULT_PRESENCE_SETTINGS,
       ...parsed,
       wsUrl: parsed.wsUrl?.trim() || DEFAULT_PRESENCE_SETTINGS.wsUrl,
       speechRate: clampRate(parsed.speechRate ?? 1),
-      browserTtsEngine: engine,
+      browserTtsEngine: parseEngine(parsed.browserTtsEngine),
       kokoroVoice:
         parsed.kokoroVoice?.trim() || DEFAULT_PRESENCE_SETTINGS.kokoroVoice,
+      pocketBuiltinVoice:
+        parsed.pocketBuiltinVoice?.trim() ||
+        DEFAULT_PRESENCE_SETTINGS.pocketBuiltinVoice,
+      pocketOutputSource: parseOutputSource(parsed.pocketOutputSource),
+      pocketClonedVoiceId: parsed.pocketClonedVoiceId?.trim() || "",
     };
   } catch {
     return { ...DEFAULT_PRESENCE_SETTINGS };
@@ -51,10 +72,14 @@ export function savePresenceSettings(settings: PresenceSettings): void {
     ...settings,
     wsUrl: settings.wsUrl.trim() || DEFAULT_PRESENCE_SETTINGS.wsUrl,
     speechRate: clampRate(settings.speechRate),
-    browserTtsEngine:
-      settings.browserTtsEngine === "kokoro" ? "kokoro" : "speechSynthesis",
+    browserTtsEngine: parseEngine(settings.browserTtsEngine),
     kokoroVoice:
       settings.kokoroVoice.trim() || DEFAULT_PRESENCE_SETTINGS.kokoroVoice,
+    pocketBuiltinVoice:
+      settings.pocketBuiltinVoice.trim() ||
+      DEFAULT_PRESENCE_SETTINGS.pocketBuiltinVoice,
+    pocketOutputSource: parseOutputSource(settings.pocketOutputSource),
+    pocketClonedVoiceId: settings.pocketClonedVoiceId.trim(),
   };
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }

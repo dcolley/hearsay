@@ -24,6 +24,7 @@ export async function captureScreenshotFrame(
   }
 
   let stream: MediaStream | null = null;
+  let grabVideo: HTMLVideoElement | null = null;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
       video: {
@@ -37,9 +38,15 @@ export async function captureScreenshotFrame(
     video.srcObject = stream;
     video.muted = true;
     video.playsInline = true;
+    // Detached videos often stay black until attached (macOS display capture).
+    video.dataset.hearsayScreenGrab = "1";
+    video.setAttribute("aria-hidden", "true");
+    video.style.cssText =
+      "position:fixed;left:-9999px;width:160px;height:90px;opacity:0;pointer-events:none";
+    grabVideo = video;
+    document.body.appendChild(video);
     await video.play();
-    // Wait for real dimensions (first frame)
-    await waitForVideoFrame(video);
+    await waitForPresentedFrame(video);
 
     const srcW = video.videoWidth;
     const srcH = video.videoHeight;
@@ -78,30 +85,56 @@ export async function captureScreenshotFrame(
     };
   } finally {
     stream?.getTracks().forEach((t) => t.stop());
+    grabVideo?.remove();
   }
 }
 
-function waitForVideoFrame(video: HTMLVideoElement): Promise<void> {
+/**
+ * Display capture's first presented frame is often solid black.
+ * Wait until a frame has real pixels, or give up after ~1.5s.
+ */
+function waitForPresentedFrame(video: HTMLVideoElement): Promise<void> {
+  const deadline = performance.now() + 1500;
   return new Promise((resolve) => {
-    if (video.videoWidth > 0) {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
       resolve();
-      return;
-    }
-    const onMeta = () => {
-      cleanup();
-      // One paint after metadata
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     };
-    const timer = window.setTimeout(() => {
-      cleanup();
-      resolve();
-    }, 1500);
-    const cleanup = () => {
-      window.clearTimeout(timer);
-      video.removeEventListener("loadeddata", onMeta);
-      video.removeEventListener("loadedmetadata", onMeta);
+    const step = () => {
+      if (settled) return;
+      if (video.videoWidth > 0 && !isBlankFrame(video)) {
+        finish();
+        return;
+      }
+      if (performance.now() >= deadline) {
+        finish();
+        return;
+      }
+      window.setTimeout(step, 80);
     };
-    video.addEventListener("loadeddata", onMeta);
-    video.addEventListener("loadedmetadata", onMeta);
+    step();
   });
+}
+
+function isBlankFrame(video: HTMLVideoElement): boolean {
+  const w = 32;
+  const h = 18;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx || !video.videoWidth) return true;
+  ctx.drawImage(video, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  let sum = 0;
+  const pixels = data.length / 4;
+  for (let i = 0; i < data.length; i += 16) {
+    sum += (data[i] ?? 0) + (data[i + 1] ?? 0) + (data[i + 2] ?? 0);
+  }
+  const samples = Math.ceil(pixels / 4);
+  const avg = sum / samples / 3;
+  // Uninitialized frames are ~0. Dark UIs still have text above this.
+  return avg < 3;
 }

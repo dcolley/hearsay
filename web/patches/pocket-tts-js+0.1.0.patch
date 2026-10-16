@@ -1,0 +1,16 @@
+diff --git a/node_modules/pocket-tts-js/src/worker.js b/node_modules/pocket-tts-js/src/worker.js
+index 77e82c0..ca64bd0 100644
+--- a/node_modules/pocket-tts-js/src/worker.js
++++ b/node_modules/pocket-tts-js/src/worker.js
+@@ -380,7 +380,10 @@ async function loadOrt() {
+     if (ort) return;
+     post({ type: "status", status: "loading-runtime" });
+     const base = config.ortBaseUrl;
+-    const ortModule = await import(/* @vite-ignore */ `${base}ort.min.mjs`);
++    // Indirect import so bundlers (Next/Turbopack/webpack) cannot try to resolve
++    // the runtime CDN URL `${base}ort.min.mjs` at build time.
++    const dynamicImport = new Function("u", "return import(u)");
++    const ortModule = await dynamicImport(`${base}ort.min.mjs`);
+     ort = ortModule.default || ortModule;
+     ort.env.wasm.wasmPaths = base;
+     ort.env.wasm.simd = true;

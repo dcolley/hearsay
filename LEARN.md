@@ -34,17 +34,40 @@ Hearsay deliberately splits **cognition** (Mastra Studio / agents) from **percep
 
 **Privacy decision:** raw PCM/JPEG stay on the laptop. Only transcripts and short vision descriptions go to the LLM.
 
+### Compared to Mastra + LiveKit
+
+[Mastra’s LiveKit voice guide](https://mastra.ai/integrations/voice/livekit) validates the same split: **agent owns cognition**, a **separate realtime process** owns turn-taking, barge-in, and spoken tool feedback. Hearsay takes that design further for a **laptop presence** agent where audio never leaves the machine.
+
+| Idea | Mastra + LiveKit | Hearsay |
+|------|------------------|---------|
+| Cognition | Mastra agent + memory | Same (`agent.stream` + LibSQL memory) |
+| Realtime process | LiveKit Agents / room | Custom perception WS (`:4112`) |
+| Mic / TTS transport | Media server / room | Browser capture + local/Kokoro/Pocket/http TTS |
+| Privacy | Audio on the room path | Raw PCM/JPEG stay on the laptop |
+| Barge-in | Platform / room semantics | DIY turn-yield + STT echo filter + `playbackOpen` floor |
+| Tool latency | `toolFeedback` fillers | Spoken fillers in [`tool-fillers.ts`](mastra2/src/mastra/perception/tool-fillers.ts) |
+| Sensors | Voice-first | Voice + webcam + one-shot screen tools |
+
+Essay (X Article draft): [Taking Mastra’s voice design further](docs/articles/taking-mastra-voice-further.md).
+
+**Decision:** do **not** adopt LiveKit as a runtime. Steal the patterns (generation vs speech metrics, heard-only interrupt memory, tool fillers); keep STT/TTS/AEC local.
+
 ---
 
 ## Voice loop
 
 ### Presence UI
 
-The `/presence` page is the laptop “eyes & ears” surface: mic, optional video, transcript, HITL cards, tool log (UI-only, not spoken).
+The `/presence` page is the laptop “eyes & ears” surface: mic, optional video, scrollable conversation, HITL cards, tool log (UI-only, not spoken).
 
 - Page: [`web/src/app/presence/page.tsx`](web/src/app/presence/page.tsx)
 - App: [`web/src/components/presence/presence-app.tsx`](web/src/components/presence/presence-app.tsx)
+- Conversation scroll (stick-to-bottom): [`web/src/components/presence/conversation-log.tsx`](web/src/components/presence/conversation-log.tsx)
 - Settings (WS URL, TTS engine/voice): [`web/src/components/presence/presence-settings-dialog.tsx`](web/src/components/presence/presence-settings-dialog.tsx)
+
+**Conversation UI:** latest turns stay at the bottom. Auto-scroll while pinned; scrolling up pauses; returning to the bottom (or “Jump to latest”) resumes. Live STT partials show as an ephemeral “You” line.
+
+**Clear chat:** Presence **Clear chat** button sends `clear_session`. Voice path: ask to “start over” / “clear the chat” → agent calls `clear_conversation`. Both wipe the Mastra thread, mint a new `threadId`, reset scene working memory, and speak “Okay, starting fresh.”
 
 ### VAD is not barge-in (turn-yield)
 
@@ -65,6 +88,13 @@ With `ASR_MODE=browser`, **browser STT finals** own turn commit (`text_utterance
 - Turn detectors: [`mastra2/src/mastra/perception/turn.ts`](mastra2/src/mastra/perception/turn.ts)
 - Browser STT: [`web/src/lib/perception/browser-stt.ts`](web/src/lib/perception/browser-stt.ts)
 - Content gate (noise / non-speech): [`mastra2/src/mastra/perception/content-gate.ts`](mastra2/src/mastra/perception/content-gate.ts)
+
+### Incomplete-final hold
+
+Browser STT sometimes finalizes mid-thought (“What’s the weather in”). Before committing, perception holds ~700 ms if the text matches a small incomplete-tail heuristic (trailing prepositions / conjunctions). A longer final cancels the hold; barge cancels it too. This is **not** semantic / LM endpointing — just a stopgap.
+
+- Heuristic: [`mastra2/src/mastra/perception/incomplete-utterance.ts`](mastra2/src/mastra/perception/incomplete-utterance.ts)
+- Wired in `onTextUtterance` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
 
 ### Streaming spoken replies
 
@@ -88,6 +118,22 @@ After `playback_done`, the server deafens VAD (and drops early `text_utterance`)
 
 - Arm logic: `beginListenArm` / `isListenArmed` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
 - Client spoken-text hold (~1.4s) for echo matching after queues drain: [`playback.ts`](web/src/lib/perception/playback.ts)
+
+### Spoken tool latency fillers
+
+While weather / search / screenshot / camera tools run, the voice floor would go silent. On `tool-call`, perception speaks a short fixed phrase once per tool name per turn (e.g. “Looking that up.”). HITL tools (`ask_user`, `offer_choices`) never get fillers — their UI is the feedback.
+
+**Decision:** tool **UI / args** are never spoken via TTS. Fillers are latency only, not a narration of tool I/O.
+
+- Map: [`tool-fillers.ts`](mastra2/src/mastra/perception/tool-fillers.ts)
+- Stream hook in `think()` ([`session.ts`](mastra2/src/mastra/perception/session.ts))
+
+### Heard-only interrupt memory
+
+On barge-in, Mastra Memory may retain a longer assistant generation than the user heard. Perception snapshots `partialSpoken`, then after the aborted stream settles either **truncates** the last assistant message to the heard slice or appends a corrective note: `[Interrupted — only this was spoken]: …`.
+
+- `interruptHeard` + `persistHeardOnlyInterrupt` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- Metric: `interrupt_heard_chars`
 
 ---
 
@@ -170,6 +216,14 @@ Agent tools that need the laptop call `ClientBridge.call(tool, args)`. Perceptio
 
 **Decision:** tool UI is never spoken via TTS — keep a separate tool log in the Presence UI.
 
+### Clear conversation tool
+
+`clear_conversation` is a Presence-only tool (needs the perception `RequestContext` callback). It deletes the current thread, creates a new one, clears resource scene working memory, emits `session_cleared` + empty `conversation_history`, and plays a fixed confirmation.
+
+- Tool: [`client-tools.ts`](mastra2/src/mastra/tools/client-tools.ts) (`clearConversationTool`)
+- Session API: `PerceptionSession.clearConversation()` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- WS control: `clear_session` in [`ws-server.ts`](mastra2/src/mastra/perception/ws-server.ts)
+
 ---
 
 ## Agent, skills, and server tools
@@ -193,10 +247,19 @@ Server-side tools so the model does not invent the clock.
 
 ### Memory
 
-LibSQL-backed Mastra Memory; shared `HEARSAY_RESOURCE_ID` across CopilotKit and presence.
+LibSQL-backed Mastra Memory; shared `HEARSAY_RESOURCE_ID` across CopilotKit and presence. Message history uses `lastMessages: 24`.
 
 - [`mastra2/src/mastra/memory/hearsay-memory.ts`](mastra2/src/mastra/memory/hearsay-memory.ts)
 - Scene schema: [`scene-schema.ts`](mastra2/src/mastra/memory/scene-schema.ts)
+
+**Stable Presence thread:** the browser stores `hearsay.presence.threadId` and sends it on WS `hello`. Perception reuses or creates that Mastra thread, then emits `conversation_history` so the UI hydrates prior turns. Reconnecting the mic resumes the same conversation until **Clear chat** / `clear_conversation`.
+
+- Thread helpers: [`web/src/lib/perception/presence-thread.ts`](web/src/lib/perception/presence-thread.ts)
+- `session.init()` / `ensureThread` / `emitConversationHistory` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+
+### Shared resource across chat and voice
+
+Presence and CopilotKit share `HEARSAY_RESOURCE_ID` (working memory / scene). Each Presence thread id is shown in the chrome and persisted in localStorage. Deep UI merge of chat ↔ voice threads is out of scope.
 
 ---
 
@@ -206,10 +269,39 @@ LibSQL-backed Mastra Memory; shared `HEARSAY_RESOURCE_ID` across CopilotKit and 
 |--------|-----|----------------|
 | System `speechSynthesis` | `enqueueText` | No — text filter only |
 | In-browser Kokoro | synthesize → blob → audio queue | Yes (same sink) |
+| In-browser Pocket TTS | synthesize → WAV blob → audio queue | Yes (same sink) |
 | HTTP sidecar (`TTS_MODE=http`) | MP3 over WS → audio queue | Yes |
 
 - Kokoro client: [`web/src/lib/perception/kokoro-tts.ts`](web/src/lib/perception/kokoro-tts.ts)
+- Pocket client: [`web/src/lib/perception/pocket-tts.ts`](web/src/lib/perception/pocket-tts.ts)
 - Server TTS adapters: [`mastra2/src/mastra/perception/tts.ts`](mastra2/src/mastra/perception/tts.ts)
+
+### Pocket built-in voices
+
+Presence Settings → Browser TTS engine → **Pocket TTS**. Pick a Kyutai built-in (`alba`, `azelma`, …) as **Output voice = Built-in**. First load downloads ONNX weights into **Cache Storage** via [`pocket-tts-js`](https://www.npmjs.com/package/pocket-tts-js); the clone encoder is **not** required for built-ins.
+
+Playback still goes through the shared AEC sink ([`playback.ts`](web/src/lib/perception/playback.ts)) — same path as Kokoro.
+
+### Voice clone (separate from choosing Pocket)
+
+Cloning is optional and opened from **Clone a voice…** (dedicated modal), not conflated with the engine picker.
+
+1. Modal loads Pocket with `voiceCloning: true` (downloads the ~21 MB encoder if needed).
+2. User records or uploads ~5–10 s of clear mono speech.
+3. `cloneVoice()` encodes in a Web Worker; we persist the **reference PCM** (not the in-worker embedding) in **IndexedDB**.
+4. Settings can set **Output voice = Cloned** and pick a saved id. After reload we re-run `cloneVoice` from the stored PCM.
+
+**Decision:** clone is **client-only** under `TTS_MODE=browser`. When perception uses `TTS_MODE=http`, the server already sends MP3 — browser Pocket/clone prefs are ignored (settings shows a warning).
+
+### Where voice data lives
+
+| What | Store | Notes |
+|------|--------|--------|
+| Prefs (engine, built-in id, output source, active clone id) | `localStorage` `hearsay.presence.settings` | Metadata only |
+| Cloned reference PCM + name | IndexedDB `hearsay.pocket.voices` | [`pocket-voice-store.ts`](web/src/lib/perception/pocket-voice-store.ts) |
+| Model weights / `voices.bin` / encoder | Cache Storage (`pocket-tts-js`) | Cleared via library `clearCache` / site data |
+
+UI: [`presence-settings-dialog.tsx`](web/src/components/presence/presence-settings-dialog.tsx), [`clone-voice-dialog.tsx`](web/src/components/presence/clone-voice-dialog.tsx).
 
 ---
 
@@ -219,6 +311,19 @@ Typed pub/sub between adapters and the WS layer; latency logs under `[perception
 
 - [`mastra2/src/mastra/perception/bus.ts`](mastra2/src/mastra/perception/bus.ts)
 
+### Generation vs speech
+
+LiveKit-style split: **generation complete** ≠ **speech playout complete**.
+
+| Metric | When |
+|--------|------|
+| `utterance_to_first_tts` | First spoken fragment of a turn |
+| `generation_complete` | Agent stream ends (before waiting on playback) |
+| `speech_complete` | Client `playback_done` (or barge / timeout); `interrupted: true\|false` |
+| `tool_filler_spoken` | Latency filler played for a tool |
+| `incomplete_hold` | Incomplete STT final deferred |
+| `interrupt_heard_chars` | Barge snapshot of heard assistant text |
+
 ---
 
 ## What we consciously did *not* build
@@ -227,17 +332,20 @@ These are good follow-on exercises — see the [topic index in the README](READM
 
 - Mount perception WS on Studio’s HTTP server (single port)
 - Software AEC3 / residual-echo metrics
-- Prosody / LM endpointing (Phase B+)
-- Speculative ASR before silence
+- Prosody / LM / semantic endpointing (we only have a heuristic incomplete-final hold)
+- Speculative reply generation before EOU
 - Continuous screen share (we one-shot `getDisplayMedia`)
 - Desktop click/type automation (screenshot is observe-only)
+- LiveKit (or any media-server) runtime — patterns only
 
 ---
 
 ## Suggested reading order
 
 1. [ADR-002](docs/adr-002-laptop-web-perception.md) — product decisions  
-2. [`session.ts`](mastra2/src/mastra/perception/session.ts) — the loop  
-3. [`media-capture.ts`](web/src/lib/perception/media-capture.ts) + [`playback.ts`](web/src/lib/perception/playback.ts) — browser half  
-4. [`turn-yield.ts`](mastra2/src/mastra/perception/turn-yield.ts) + [`webrtc-aec-playback.ts`](web/src/lib/perception/webrtc-aec-playback.ts) — duplex hardness  
-5. [`client-bridge.ts`](mastra2/src/mastra/perception/client-bridge.ts) + [`client-tools.ts`](mastra2/src/mastra/tools/client-tools.ts) — tools to the laptop  
+2. [Compared to Mastra + LiveKit](#compared-to-mastra--livekit) + [article](docs/articles/taking-mastra-voice-further.md)  
+3. [`session.ts`](mastra2/src/mastra/perception/session.ts) — the loop  
+4. [`media-capture.ts`](web/src/lib/perception/media-capture.ts) + [`playback.ts`](web/src/lib/perception/playback.ts) — browser half  
+5. [`turn-yield.ts`](mastra2/src/mastra/perception/turn-yield.ts) + [`webrtc-aec-playback.ts`](web/src/lib/perception/webrtc-aec-playback.ts) — duplex hardness  
+6. [`client-bridge.ts`](mastra2/src/mastra/perception/client-bridge.ts) + [`client-tools.ts`](mastra2/src/mastra/tools/client-tools.ts) — tools to the laptop  
+

@@ -26,7 +26,7 @@ export function createHearsayMemory(storage = createHearsayStorage()) {
   memorySingleton = new Memory({
     storage,
     options: {
-      lastMessages: 12,
+      lastMessages: 24,
       // Observational memory was inventing/persisting wrong scene facts (e.g. phones).
       // Camera grounding uses schema working memory + live describe instead.
       observationalMemory: false,

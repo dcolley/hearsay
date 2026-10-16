@@ -13,19 +13,70 @@ import {
 
 const sceneMemory = createHearsayMemory();
 
-function getBridge(requestContext: unknown): ClientBridgeHandle | undefined {
+function getFromContext<T>(
+  requestContext: unknown,
+  key: string,
+): T | undefined {
   if (
     requestContext &&
     typeof requestContext === "object" &&
     "get" in requestContext &&
     typeof (requestContext as { get: (k: string) => unknown }).get === "function"
   ) {
-    return (requestContext as { get: (k: string) => unknown }).get(
-      "clientBridge",
-    ) as ClientBridgeHandle | undefined;
+    return (requestContext as { get: (k: string) => unknown }).get(key) as
+      | T
+      | undefined;
   }
   return undefined;
 }
+
+function getBridge(requestContext: unknown): ClientBridgeHandle | undefined {
+  return getFromContext<ClientBridgeHandle>(requestContext, "clientBridge");
+}
+
+type ClearConversationFn = () => Promise<{
+  threadId: string;
+  resourceId: string;
+}>;
+
+export const clearConversationTool = createTool({
+  id: "clear_conversation",
+  description:
+    "Clear the current Presence conversation memory and start a fresh thread. Call when the user asks to start over, clear the chat, reset, or wipe the conversation. Do not claim history is gone without calling this.",
+  inputSchema: z.object({
+    reason: z
+      .string()
+      .optional()
+      .describe("Optional short reason, e.g. user asked to start over"),
+  }),
+  outputSchema: z.object({
+    ok: z.boolean(),
+    threadId: z.string().optional(),
+    error: z.string().optional(),
+  }),
+  execute: async (_input, context) => {
+    const clear = getFromContext<ClearConversationFn>(
+      context?.requestContext,
+      "clearConversation",
+    );
+    if (!clear) {
+      return {
+        ok: false,
+        error:
+          "Clear is only available in the Presence mic session. Ask the user to use Presence or the Clear button.",
+      };
+    }
+    try {
+      const result = await clear();
+      return { ok: true, threadId: result.threadId };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  },
+});
 
 export const askUserTool = createTool({
   id: "ask_user",

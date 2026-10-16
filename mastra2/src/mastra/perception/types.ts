@@ -37,7 +37,13 @@ export function formatScene(scene: SceneMemory): string {
 
 /** Client → server JSON control messages */
 export type ClientControlMessage =
-  | { type: "hello"; t_ms: number; sampleRate?: number }
+  | {
+      type: "hello";
+      t_ms: number;
+      sampleRate?: number;
+      /** Preferred Mastra memory thread to resume (Presence localStorage). */
+      threadId?: string;
+    }
   | { type: "speech_start"; t_ms: number }
   | { type: "barge_in"; t_ms: number }
   | { type: "text_utterance"; t_ms: number; text: string }
@@ -58,7 +64,14 @@ export type ClientControlMessage =
       error?: string;
     }
   | { type: "playback_done"; t_ms: number }
+  | { type: "clear_session"; t_ms: number }
   | { type: "ping"; t_ms: number };
+
+export type ConversationTurn = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+};
 
 /** Server → client JSON messages */
 export type ServerControlMessage =
@@ -98,6 +111,17 @@ export type ServerControlMessage =
       listenArmMs: number;
       sustainMs: number;
       visionEnabled: boolean;
+      threadId: string;
+      resourceId: string;
+    }
+  | {
+      type: "conversation_history";
+      t_ms: number;
+      messages: ConversationTurn[];
+    }
+  | {
+      type: "session_cleared";
+      t_ms: number;
       threadId: string;
       resourceId: string;
     }

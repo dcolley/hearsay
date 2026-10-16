@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start --port 3001",
     "lint": "eslint",
-    "test": "tsx --test src/lib/perception/**/*.test.ts"
+    "test": "tsx --test src/lib/perception/**/*.test.ts",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@copilotkit/react-core": "^1.78.0",
@@ -18,6 +19,7 @@
     "kokoro-js": "^1.2.1",
     "lucide-react": "^1.55.0",
     "next": "16.4.0",
+    "pocket-tts-js": "^0.1.0",
     "radix-ui": "^1.8.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -32,6 +34,8 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.0",
+    "patch-package": "^8.0.1",
+    "postinstall-postinstall": "^2.1.0",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5"

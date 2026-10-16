@@ -77,6 +77,32 @@ export async function preloadKokoro(): Promise<void> {
   await getKokoro();
 }
 
+/** ORT EP-assignment + transformers fetch noise — not failures. */
+const BENIGN_ORT_WARN =
+  /Unable to determine content-length|VerifyEachNodeIsAssignedToAnEp|\[W:onnxruntime:/i;
+
+async function withBenignOrtNoiseSuppressed<T>(
+  run: () => Promise<T>,
+): Promise<T> {
+  const prevWarn = console.warn;
+  const prevError = console.error;
+  const filter =
+    (orig: typeof console.warn) =>
+    (...args: unknown[]) => {
+      const text = args.map(String).join(" ");
+      if (BENIGN_ORT_WARN.test(text)) return;
+      orig.apply(console, args as Parameters<typeof console.warn>);
+    };
+  console.warn = filter(prevWarn);
+  console.error = filter(prevError);
+  try {
+    return await run();
+  } finally {
+    console.warn = prevWarn;
+    console.error = prevError;
+  }
+}
+
 async function getKokoro(): Promise<KokoroInstance> {
   if (instance) return instance;
   if (loadPromise) return loadPromise;
@@ -88,32 +114,37 @@ async function getKokoro(): Promise<KokoroInstance> {
 
     // Dynamic import keeps SSR / Node bundling away from onnxruntime-web
     const { KokoroTTS } = await import("kokoro-js");
+    const { env } = await import("@huggingface/transformers");
+    // Default is "warning"; EP reassignment spam is expected on wasm/webgpu.
+    env.backends.onnx.logLevel = "error";
 
-    const tts = await KokoroTTS.from_pretrained(MODEL_ID, {
-      dtype,
-      device,
-      progress_callback: (info) => {
-        const prog =
-          typeof info === "object" &&
-          info &&
-          "progress" in info &&
-          typeof (info as { progress?: number }).progress === "number"
-            ? (info as { progress: number }).progress
-            : undefined;
-        const statusText =
-          typeof info === "object" &&
-          info &&
-          "status" in info &&
-          typeof (info as { status?: string }).status === "string"
-            ? (info as { status: string }).status
-            : "Downloading model…";
-        setStatus({
-          state: "loading",
-          message: statusText,
-          progress: prog,
-        });
-      },
-    });
+    const tts = await withBenignOrtNoiseSuppressed(() =>
+      KokoroTTS.from_pretrained(MODEL_ID, {
+        dtype,
+        device,
+        progress_callback: (info) => {
+          const prog =
+            typeof info === "object" &&
+            info &&
+            "progress" in info &&
+            typeof (info as { progress?: number }).progress === "number"
+              ? (info as { progress: number }).progress
+              : undefined;
+          const statusText =
+            typeof info === "object" &&
+            info &&
+            "status" in info &&
+            typeof (info as { status?: string }).status === "string"
+              ? (info as { status: string }).status
+              : "Downloading model…";
+          setStatus({
+            state: "loading",
+            message: statusText,
+            progress: prog,
+          });
+        },
+      }),
+    );
 
     const wrapped: KokoroInstance = {
       voices: tts.voices as Record<string, { name?: string }>,

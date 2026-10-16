@@ -60,4 +60,10 @@ export type PerceptionEvents = {
     t_ms: number;
     detail?: Record<string, number | string | boolean>;
   };
+  /** Hydrated Mastra thread turns for the Presence conversation UI. */
+  conversation_history: {
+    messages: import("./types.ts").ConversationTurn[];
+  };
+  /** Thread wiped + new threadId minted. */
+  session_cleared: { threadId: string; resourceId: string };
 };

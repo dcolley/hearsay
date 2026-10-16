@@ -23,9 +23,9 @@ cp .env.example .env   # complete defaults for ASR/TTS/VAD/vision
 | Knob | Default | Notes |
 |------|---------|--------|
 | `ASR_MODE` | `browser` | Web Speech API in presence; `http` + `ASR_URL` for whisper sidecar; `mock` for loop tests |
-| `TTS_MODE` | `browser` | Client speaks `tts_text` via SpeechSynthesis **or** optional in-browser Kokoro (Presence Settings) |
+| `TTS_MODE` | `browser` | Client speaks `tts_text` via SpeechSynthesis, in-browser Kokoro, or Pocket TTS / clone (Presence Settings) |
 | `TTS_URL` | `http://127.0.0.1:8880` | Sidecar path: set `TTS_MODE=http` + Kokoro FastAPI / Piper → MP3 in the tab |
-| `TTS_VOICE` | `af_heart` | Kokoro voice id when using HTTP TTS |
+| `TTS_VOICE` | `af_heart` | Kokoro voice id when using HTTP TTS (ignored for browser Pocket/Kokoro) |
 | `VISION_ENABLED` | `true` | Advertised in `hello_ack`; client Start/Stop video |
 
 Agents resolve the model as `{ id: "spark/<name>", url: OPENAI_BASE_URL }` so Mastra uses **Chat Completions** (Spark/vLLM). A bare `openai/...` string would use OpenAI Responses and fail with `item_reference` errors.
@@ -97,6 +97,6 @@ Client tools (fulfilled by CopilotKit HITL / presence `client.action`):
 
 The LLM runs only after a **committed turn** (browser STT final, or text Send). Idle/listening with no speech is expected — not a dead model.
 
-Presence **Settings** stores client prefs (WS URL, system TTS voice/rate, auto-start video). Server modes are shown read-only from `hello_ack` (edit `mastra2/.env` and restart perception to change them).
+Presence **Settings** stores client prefs (WS URL, TTS engine/voice/rate, Pocket built-in vs clone, auto-start video). Server modes are shown read-only from `hello_ack` (edit `mastra2/.env` and restart perception to change them). Voice cloning requires `TTS_MODE=browser` — see root [LEARN.md](../LEARN.md#voice-clone-separate-from-choosing-pocket).
 
-**Better TTS audio:** run an OpenAI-compatible Kokoro (or Piper) server on `TTS_URL`, then set `TTS_MODE=http`. The browser plays returned MP3 via the Presence audio queue (same WebRTC AEC sink as in-browser Kokoro) — no SpeechSynthesis.
+**Better TTS audio:** with `TTS_MODE=browser`, use Presence Settings → Kokoro or Pocket (built-in or clone). Or run an OpenAI-compatible Kokoro (or Piper) server on `TTS_URL` with `TTS_MODE=http` — the browser plays returned MP3 via the Presence audio queue (same WebRTC AEC sink).

@@ -11,6 +11,7 @@ import {
 import {
   askUserTool,
   captureScreenshotTool,
+  clearConversationTool,
   offerChoicesTool,
   requestCameraFrameTool,
 } from "../tools/client-tools.ts";
@@ -31,6 +32,10 @@ You are Hearsay, a voice and chat assistant on a laptop dock.
 
 Your text input may come from typed chat or from the user's voice.
 Replies may be spoken aloud by TTS and shown as transcript.
+
+This Presence session is a continuous multi-turn conversation on one memory thread.
+Use prior turns in this thread — do not forget what the user already said this session.
+When the user asks to start over, clear the chat, reset, or wipe the conversation, you MUST call \`clear_conversation\` — do not pretend history is gone without that tool. After it succeeds, confirm briefly (e.g. "Okay, starting fresh.").
 
 Write plain spoken English only — the reply is read aloud by TTS.
 - Prefer short sentences. One idea per sentence. Keep replies brief.
@@ -81,6 +86,7 @@ For current events or things you are unsure about, call \`web_search\` instead o
     offer_choices: offerChoicesTool,
     request_camera_frame: requestCameraFrameTool,
     capture_screenshot: captureScreenshotTool,
+    clear_conversation: clearConversationTool,
     get_date_time: getDateTimeTool,
     format_date_time: formatDateTimeTool,
     get_weather: weatherTool,

@@ -7,9 +7,11 @@ import {
   encodePcmFrame,
   PCM_SAMPLE_RATE,
   type AgentState,
+  type ConversationTurn,
   type ServerHelloInfo,
   type ServerMessage,
 } from "./protocol";
+import { loadPresenceThreadId } from "./presence-thread";
 
 export type ClientAction = {
   id: string;
@@ -35,6 +37,11 @@ export type MediaCaptureHandlers = {
   /** Post-TTS arm delay: false while cooling down. */
   onListenArm?: (armed: boolean) => void;
   onVideo?: (active: boolean) => void;
+  onConversationHistory?: (messages: ConversationTurn[]) => void;
+  onSessionCleared?: (info: {
+    threadId: string;
+    resourceId: string;
+  }) => void;
 };
 
 export type MediaCaptureOptions = {
@@ -337,6 +344,14 @@ export class MediaCapture {
     });
   }
 
+  /** Wipe server thread + scene; Presence clears the conversation UI on session_cleared. */
+  clearSession(): void {
+    this.sendJson({
+      type: "clear_session",
+      t_ms: performance.now(),
+    });
+  }
+
   sendToolResult(
     id: string,
     payload: { ok: boolean; result?: unknown; error?: string },
@@ -445,10 +460,12 @@ export class MediaCapture {
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
+        const threadId = loadPresenceThreadId();
         this.sendJson({
           type: "hello",
           t_ms: performance.now(),
           sampleRate: PCM_SAMPLE_RATE,
+          ...(threadId ? { threadId } : {}),
         });
         this.opts.handlers?.onConnection?.(true);
         resolve();
@@ -541,6 +558,15 @@ export class MediaCapture {
           id: msg.id,
           tool: msg.tool,
           args: msg.args,
+        });
+        break;
+      case "conversation_history":
+        this.opts.handlers?.onConversationHistory?.(msg.messages ?? []);
+        break;
+      case "session_cleared":
+        this.opts.handlers?.onSessionCleared?.({
+          threadId: msg.threadId,
+          resourceId: msg.resourceId,
         });
         break;
       case "error":
