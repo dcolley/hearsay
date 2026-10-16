@@ -122,6 +122,14 @@ Local models (Spark) drift into CJK under garbled audio, which an English browse
 - Fallback wiring: `think()` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
 - Tests: [`speakable.test.ts`](mastra2/src/mastra/perception/speakable.test.ts), [`speakable.session.test.ts`](mastra2/src/mastra/perception/speakable.session.test.ts)
 
+### Voice orb (the presence face)
+
+The Session card shows a glowing orb whose mood follows agent state — grok-style life from easing and micro-motion, not complexity: always-float, blink cadence per mood, pupil drift as the "alive" cue. All personality lives in a pure, tested map; the component is presentational CSS driven by custom properties.
+
+- Mood map (pure, tested): [`web/src/lib/perception/orb-mood.ts`](web/src/lib/perception/orb-mood.ts) — `state x running -> {mood, glow, size, blink, pulse, drift, colors}`, one distinct face per state, `sleep` when the mic is off
+- Component: [`web/src/components/presence/voice-orb.tsx`](web/src/components/presence/voice-orb.tsx) — CSS keyframes, honors `prefers-reduced-motion`
+- Tests: [`web/src/lib/perception/orb-mood.test.ts`](web/src/lib/perception/orb-mood.test.ts)
+
 ### Listen-arm after TTS
 
 After `playback_done`, the server deafens VAD (and drops early `text_utterance`) for `LISTEN_ARM_MS` so the last words of TTS aren’t treated as the user.

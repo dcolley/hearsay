@@ -34,6 +34,7 @@ import type {
   ConversationTurn,
   ServerHelloInfo,
 } from "@/lib/perception/protocol";
+import { VoiceOrb } from "@/components/presence/voice-orb";
 import {
   DEFAULT_PRESENCE_SETTINGS,
   loadPresenceSettings,
@@ -489,7 +490,10 @@ export function PresenceApp() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle className="text-base">Session</CardTitle>
+            <div className="flex items-center gap-3">
+              <VoiceOrb state={state} running={running} />
+              <CardTitle className="text-base">Session</CardTitle>
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge
                 className={cn(
