@@ -87,6 +87,7 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | Incomplete-final hold (heuristic EOU) | [LEARN — Incomplete-final hold](LEARN.md#incomplete-final-hold) |
 | Streaming TTS by sentence | [LEARN — Streaming spoken replies](LEARN.md#streaming-spoken-replies) |
 | Progress speech while tools run (ADR-003) | [LEARN — Progress speech](LEARN.md#progress-speech-talks-while-it-works) |
+| Speakable guard: CJK drift never spoken (ADR-004) | [LEARN — Speakable guard](LEARN.md#speakable-guard-adr-004) |
 | Listen-arm after playback | [LEARN — Listen-arm after TTS](LEARN.md#listen-arm-after-tts) |
 | Spoken tool latency fillers | [LEARN — Tool fillers](LEARN.md#spoken-tool-latency-fillers) |
 | Heard-only interrupt memory | [LEARN — Heard-only interrupt](LEARN.md#heard-only-interrupt-memory) |

@@ -85,6 +85,10 @@ function tidySpoken(s: string): string {
     .trim();
 }
 
+import { dropUnreadableScripts } from "./speakable.ts";
+
 export function toSpokenReply(raw: string): string {
-  return tidySpoken(stripContentPartWrapper(raw));
+  // ADR-004: keep what the English voice can pronounce (local models drift
+  // into CJK under garbled audio); unreadable script never reaches TTS.
+  return tidySpoken(dropUnreadableScripts(stripContentPartWrapper(raw)));
 }

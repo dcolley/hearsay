@@ -113,6 +113,15 @@ During tool calls and long runs the agent would otherwise go quiet for tens of s
 - Memory hygiene: [`narration-guard.ts`](mastra2/src/mastra/perception/narration-guard.ts) strips model-echoed narration lines on write via `HearsayMemory` (the jarvis-desk-bot `strip_progress` lesson, done at the write side instead of in the stream)
 - Tests: [`progress.test.ts`](mastra2/src/mastra/perception/progress.test.ts), [`session.progress.test.ts`](mastra2/src/mastra/perception/session.progress.test.ts), [`narration-guard.test.ts`](mastra2/src/mastra/perception/narration-guard.test.ts), [`memory-hygiene.test.ts`](mastra2/src/mastra/memory/memory-hygiene.test.ts)
 
+### Speakable guard (ADR-004)
+
+Local models (Spark) drift into CJK under garbled audio, which an English browser voice cannot read. `dropUnreadableScripts` strips unreadable script (CJK/Kana/Hangul/fullwidth) from every spoken path inside `toSpokenReply`, and a wholly-unreadable answer speaks "Sorry, I didn't catch that." instead of silence. Transcript and memory keep the model's real output. One Unicode rule, no phrase-matching guards (the jarvis lesson: guards beat pattern patches, and the real fix is model choice + audio quality).
+
+- Guard: [`mastra2/src/mastra/perception/speakable.ts`](mastra2/src/mastra/perception/speakable.ts)
+- Applied in: [`reply-text.ts`](mastra2/src/mastra/perception/reply-text.ts) (`toSpokenReply`)
+- Fallback wiring: `think()` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- Tests: [`speakable.test.ts`](mastra2/src/mastra/perception/speakable.test.ts), [`speakable.session.test.ts`](mastra2/src/mastra/perception/speakable.session.test.ts)
+
 ### Listen-arm after TTS
 
 After `playback_done`, the server deafens VAD (and drops early `text_utterance`) for `LISTEN_ARM_MS` so the last words of TTS aren’t treated as the user.

@@ -27,6 +27,7 @@ import {
   looksIncompleteUtterance,
 } from "./incomplete-utterance.ts";
 import { toSpokenReply } from "./reply-text.ts";
+import { NOT_CAUGHT, hasUnreadableScript } from "./speakable.ts";
 import { firstCompleteSentence } from "./sentences.ts";
 import { ProgressNarrator } from "./progress.ts";
 import { toolFillerPhrase } from "./tool-fillers.ts";
@@ -899,6 +900,7 @@ export class PerceptionSession {
     let rawBuf = "";
     let spokenOffset = 0;
     let spoke = false;
+    let sawUnreadable = false;
     const fillersSpoken = new Set<string>();
 
     const flushSpeakable = async (forceRest: boolean): Promise<void> => {
@@ -979,6 +981,14 @@ export class PerceptionSession {
           const delta = typeof payload?.text === "string" ? payload.text : "";
           if (delta) {
             narrator.onAnswerText();
+            if (hasUnreadableScript(delta)) {
+              if (!sawUnreadable) {
+                sawUnreadable = true;
+                console.warn(
+                  "[perception] model emitted unreadable script (CJK?); it was dropped before TTS",
+                );
+              }
+            }
             rawBuf += delta;
             await flushSpeakable(false);
           }
@@ -1025,6 +1035,14 @@ export class PerceptionSession {
 
       if (!this.turnAbort.signal.aborted) {
         await flushSpeakable(true);
+      }
+
+      // ADR-004: the model said something, but none of it was speakable
+      // (local-model CJK drift) — be honest out loud instead of silent.
+      if (!this.turnAbort.signal.aborted && !spoke && sawUnreadable) {
+        this.enqueueSpeak(NOT_CAUGHT);
+        spoke = true;
+        this.metric("unreadable_answer_guarded", this.clientNow());
       }
 
       // Let every queued fragment (answer + narration) synthesise before
