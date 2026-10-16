@@ -29,6 +29,8 @@ const sustainMs = Number(process.env.BARGE_IN_SUSTAIN_MS || 180);
 const effortMs = Number(process.env.BARGE_EFFORT_MS || 300);
 const visionEnabled =
   (process.env.VISION_ENABLED ?? "true").toLowerCase() !== "false";
+const progressEnabled =
+  (process.env.PROGRESS_ENABLED ?? "true").toLowerCase() !== "false";
 
 async function createSession() {
   return new PerceptionSession({
@@ -45,6 +47,7 @@ async function createSession() {
     listenArmMs,
     sustainMs,
     resourceId: hearsayResourceId,
+    progress: { enabled: progressEnabled },
   });
 }
 
@@ -66,6 +69,9 @@ console.log(
 );
 console.log(
   `[perception] LISTEN_ARM_MS=${listenArmMs} BARGE_IN_SUSTAIN_MS=${sustainMs} BARGE_EFFORT_MS=${effortMs}`,
+);
+console.log(
+  `[perception] PROGRESS_ENABLED=${progressEnabled} PROGRESS_ACK_MS=${process.env.PROGRESS_ACK_MS || 3000} PROGRESS_STILL_MS=${process.env.PROGRESS_STILL_MS || 20000}`,
 );
 console.log(
   `[perception] OPENAI_BASE_URL=${process.env.OPENAI_BASE_URL || "(unset)"} MODEL=${process.env.OPENAI_MODEL || "(unset)"} resource=${hearsayResourceId}`,

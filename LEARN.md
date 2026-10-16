@@ -74,6 +74,14 @@ Agent text is flushed to TTS in sentence-sized chunks so first audio starts befo
 - Spoken shaping: [`mastra2/src/mastra/perception/reply-text.ts`](mastra2/src/mastra/perception/reply-text.ts)
 - Client playback queue: [`web/src/lib/perception/playback.ts`](web/src/lib/perception/playback.ts)
 
+### Progress speech (talks while it works)
+
+During tool calls and long runs the agent would otherwise go quiet for tens of seconds. A `ProgressNarrator` speaks: "Let me check." after `PROGRESS_ACK_MS` of silence, a per-tool line when a tool starts ("Searching the web."), and "Still working on it." after `PROGRESS_STILL_MS`, capped at `PROGRESS_MAX_STILL`. Line choice is request-aware (generic skills match the user's words, not the tool name); `ask_user` / `offer_choices` speak nothing (the question is the update); fillers stop once the answer streams. Narration rides the same speak FIFO as answer sentences, so playback, echo floor, and barge behave identically — and, because it is spoken outside the model stream, it never enters conversation memory (the lesson jarvis-desk-bot needed `strip_progress` for). Decision: [ADR-003](docs/adr-003-progress-speech.md).
+
+- Narrator: [`mastra2/src/mastra/perception/progress.ts`](mastra2/src/mastra/perception/progress.ts)
+- Wiring: `think()` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- Tests: [`progress.test.ts`](mastra2/src/mastra/perception/progress.test.ts), [`session.progress.test.ts`](mastra2/src/mastra/perception/session.progress.test.ts)
+
 ### Listen-arm after TTS
 
 After `playback_done`, the server deafens VAD (and drops early `text_utterance`) for `LISTEN_ARM_MS` so the last words of TTS aren’t treated as the user.

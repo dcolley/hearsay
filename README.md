@@ -81,6 +81,7 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | Soft-pause then hard yield | [LEARN — turn-yield](LEARN.md#vad-is-not-barge-in-turn-yield) |
 | End of utterance (browser STT vs Whisper) | [LEARN — End of utterance](LEARN.md#end-of-utterance-listen-path) |
 | Streaming TTS by sentence | [LEARN — Streaming spoken replies](LEARN.md#streaming-spoken-replies) |
+| Progress speech while tools run (ADR-003) | [LEARN — Progress speech](LEARN.md#progress-speech-talks-while-it-works) |
 | Listen-arm after playback | [LEARN — Listen-arm after TTS](LEARN.md#listen-arm-after-tts) |
 
 ### Speaker duplex (the hard part)
@@ -153,6 +154,8 @@ See [`mastra2/.env.example`](./mastra2/.env.example). Important knobs:
 | `PERCEPTION_WS_PORT` | default `4112` |
 | `BARGE_IN_ENABLED` | speaker duplex (AEC + echo filter) |
 | `LISTEN_ARM_MS` | post-TTS deaf window |
+| `PROGRESS_ENABLED` | talk-while-working narration (default `true`; `false` = silent until answer) |
+| `PROGRESS_ACK_MS` / `PROGRESS_STILL_MS` / `PROGRESS_MAX_STILL` | narration timing (defaults 3000 / 20000 / 6) |
 | `HEARSAY_RESOURCE_ID` | shared memory across chat + presence |
 | `HEARSAY_TIMEZONE` | default for date/time tools |
 | `TAVILY_API_KEY` | web search |

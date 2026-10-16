@@ -21,6 +21,7 @@ import {
 } from "./describe-frame.ts";
 import { toSpokenReply } from "./reply-text.ts";
 import { firstCompleteSentence } from "./sentences.ts";
+import { ProgressNarrator } from "./progress.ts";
 import type { TurnAdapter } from "./turn.ts";
 import {
   createTurnYieldAdapter,
@@ -58,6 +59,17 @@ export type SessionDeps = {
    * (browser Web Speech API). Browser STT finals are the sole turn commit.
    */
   clientOwnsAsr?: boolean;
+  /**
+   * Progress speech (ADR-003): spoken updates while the agent thinks or
+   * runs tools. Env fallbacks: PROGRESS_ENABLED / PROGRESS_ACK_MS /
+   * PROGRESS_STILL_MS / PROGRESS_MAX_STILL.
+   */
+  progress?: {
+    enabled?: boolean;
+    ackAfterMs?: number;
+    stillAfterMs?: number;
+    maxStill?: number;
+  };
 };
 
 const MAX_UTTERANCE_SAMPLES = 16_000 * 30;
@@ -92,6 +104,20 @@ export class PerceptionSession {
   private listenArmedAt = 0;
   private listenArmTimer?: ReturnType<typeof setTimeout>;
 
+  /** Progress speech options (ADR-003). */
+  private readonly progressOpts: {
+    enabled: boolean;
+    ackAfterMs: number;
+    stillAfterMs: number;
+    maxStill: number;
+  };
+
+  /**
+   * FIFO of TTS work so narration lines and answer sentences synthesise in
+   * order — the speak generator must never overlap another.
+   */
+  private speakQueue: Promise<void> = Promise.resolve();
+
   private readonly listenSustain: SustainedSpeechGate;
   private readonly turnYield: TurnYieldAdapter;
   /** Echo floor: ignore yield candidates until this client t_ms. */
@@ -125,6 +151,18 @@ export class PerceptionSession {
     const sustainMs =
       deps.sustainMs ?? Number(process.env.BARGE_IN_SUSTAIN_MS || 180);
     this.listenSustain = new SustainedSpeechGate(sustainMs);
+    this.progressOpts = {
+      enabled:
+        deps.progress?.enabled ??
+        (process.env.PROGRESS_ENABLED ?? "true").toLowerCase() !== "false",
+      ackAfterMs:
+        deps.progress?.ackAfterMs ?? Number(process.env.PROGRESS_ACK_MS || 3000),
+      stillAfterMs:
+        deps.progress?.stillAfterMs ??
+        Number(process.env.PROGRESS_STILL_MS || 20000),
+      maxStill:
+        deps.progress?.maxStill ?? Number(process.env.PROGRESS_MAX_STILL || 6),
+    };
     this.turnYield =
       deps.turnYield ?? createTurnYieldAdapter({ sustainMs });
     this.scene = deps.vision.getScene();
@@ -568,6 +606,26 @@ export class PerceptionSession {
     this.setState("thinking");
     this.partialSpoken = "";
 
+    // Progress speech (ADR-003): spoken updates while tools run. Narration is
+    // queued through the same FIFO as answer sentences, outside the model
+    // stream, so it never enters conversation memory.
+    const narrator = new ProgressNarrator(
+      {
+        request: this.utterance,
+        ...this.progressOpts,
+      },
+      () => performance.now(),
+    );
+    const progressTimer = this.progressOpts.enabled
+      ? setInterval(() => {
+          if (this.turnAbort?.signal.aborted) return;
+          // While ask_user / offer_choices wait, the question is the update.
+          if (this.bridge.hasPending()) return;
+          const line = narrator.tick();
+          if (line) this.enqueueSpeak(line);
+        }, 500)
+      : undefined;
+
     console.log(
       `[perception] think() start thread=${this.threadId} utterance=${JSON.stringify(this.utterance).slice(0, 120)}`,
     );
@@ -614,7 +672,7 @@ export class PerceptionSession {
       if (forceRest) {
         const rest = pending.trim();
         if (rest) {
-          await this.speakFragment(rest);
+          this.enqueueSpeak(rest);
           spoke = true;
           spokenOffset = spoken.length;
         }
@@ -633,7 +691,7 @@ export class PerceptionSession {
         pending = pending.slice(cut);
         spokenOffset = spoken.length - pending.length;
         if (sentence) {
-          await this.speakFragment(sentence);
+          this.enqueueSpeak(sentence);
           spoke = true;
         }
       }
@@ -646,7 +704,7 @@ export class PerceptionSession {
         !/^\s*\{/.test(rawBuf.trim())
       ) {
         const fragment = pending.trim();
-        await this.speakFragment(fragment);
+        this.enqueueSpeak(fragment);
         spoke = true;
         spokenOffset = spoken.length;
       }
@@ -680,6 +738,7 @@ export class PerceptionSession {
           const payload = chunk.payload as { text?: string };
           const delta = typeof payload?.text === "string" ? payload.text : "";
           if (delta) {
+            narrator.onAnswerText();
             rawBuf += delta;
             await flushSpeakable(false);
           }
@@ -689,14 +748,22 @@ export class PerceptionSession {
         ) {
           const payload = chunk.payload as { toolName?: string };
           console.log(
-            `[perception] ${chunk.type}: ${payload?.toolName ?? "?"}`,
+            `[perception] ${chunk.type}: ${payload?.toolName ?? "?"}`
           );
+          if (chunk.type === "tool-call") {
+            const line = narrator.onToolStart(payload?.toolName ?? "");
+            if (line) this.enqueueSpeak(line);
+          }
         }
       }
 
       if (!this.turnAbort.signal.aborted) {
         await flushSpeakable(true);
       }
+
+      // Let every queued fragment (answer + narration) synthesise before
+      // declaring the end of speech — tts_flush must not arrive early.
+      await this.drainSpeakQueue();
 
       if (!this.turnAbort.signal.aborted) {
         if (spoke) {
@@ -722,6 +789,7 @@ export class PerceptionSession {
         this.setState("idle");
       }
     } finally {
+      if (progressTimer) clearInterval(progressTimer);
       this.thinking = false;
     }
   }
@@ -808,6 +876,23 @@ export class PerceptionSession {
         err instanceof Error ? err.message : err,
       );
       return null;
+    }
+  }
+
+  /** Queue a fragment through the speak FIFO (answer sentences + narration). */
+  private enqueueSpeak(text: string): void {
+    const next = this.speakQueue.then(() => this.speakFragment(text));
+    this.speakQueue = next.catch((err: unknown) => {
+      console.error("[perception] speak queue error:", err);
+    });
+  }
+
+  /** Resolve once every queued fragment has been synthesised. */
+  private async drainSpeakQueue(): Promise<void> {
+    let last: Promise<void> | undefined;
+    while (last !== this.speakQueue) {
+      last = this.speakQueue;
+      await last;
     }
   }
 
