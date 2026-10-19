@@ -242,3 +242,50 @@ describe("session: schedule anchor with a stalled client clock (F6)", () => {
     }
   });
 });
+
+describe("reset matrix: barge clears fully, drain timeout decays (F7)", () => {
+  it("barge-in clears the dynamic window completely", async () => {
+    const { session } = makeLiveSession();
+    try {
+      await speakTurn(session);
+      assert.ok((session as unknown as { audioIssuedEndAt: number })
+        .audioIssuedEndAt > 1700);
+      session.bargeIn(2500);
+      // The interrupting utterance owns the floor: no dynamic tail.
+      assert.equal((session as unknown as { audioIssuedEndAt: number })
+        .audioIssuedEndAt, 0);
+      // Only the static listen-arm seed remains (1000 + 700).
+      assert.equal(session.echoFloorAt(1750), START_MS + LISTEN_ARM_MS);
+      assert.ok(
+        session.echoFloorAt(2900) - 2900 < 0,
+        "static seed must already be behind the horizon after barge",
+      );
+    } finally {
+      session.reset();
+    }
+  });
+
+  it("drain timeout keeps the horizon and decays to the margin only", async () => {
+    const { session } = makeLiveSession();
+    try {
+      await speakTurn(session);
+      await sleep(TIMEOUT_REAL_MS + 80);
+      const priv = session as unknown as {
+        audioIssuedEndAt: number;
+        playbackOpen: boolean;
+      };
+      // Intentionally NOT cleared by the watchdog (F1 semantics), but
+      // playbackOpen is released.
+      assert.equal(priv.playbackOpen, false);
+      assert.equal(priv.audioIssuedEndAt, END_AT_MS);
+      // In-window: pinned horizon; past it: decays to t + margin.
+      assert.equal(session.echoFloorAt(DRAIN_AT_MS), WINDOW_END_MS);
+      assert.equal(
+        session.echoFloorAt(END_AT_MS + 5) - (END_AT_MS + 5),
+        MARGIN_MS,
+      );
+    } finally {
+      session.reset();
+    }
+  });
+});
