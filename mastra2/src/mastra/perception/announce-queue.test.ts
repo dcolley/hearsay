@@ -94,6 +94,27 @@ describe("AnnounceQueue (ADR-008)", () => {
     assert.equal(q.maybeDrain(2400, true, false)?.id, "r");
   });
 
+  it("requeue evicts the OLDEST on overflow, same policy as push", () => {
+    // Consistent cap semantics (ADR-008 "the oldest evicts"): the eviction
+    // victim past the cap is always the smallest pushedAt, whether the new
+    // item arrived via push or via a barge re-queue.
+    const q = queue({ max: 3 });
+    q.push({ id: "1", text: "one" }, 10);
+    q.push({ id: "2", text: "two" }, 11);
+    q.push({ id: "3", text: "three" }, 12);
+    q.requeue({ id: "late", text: "barged result" }, 20);
+    assert.equal(q.size(), 3);
+    assert.equal(q.maybeDrain(20, true, false), null, "streak starts");
+    const drained: string[] = [];
+    for (;;) {
+      const m = q.maybeDrain(1220, true, false);
+      if (!m) break;
+      drained.push(m.id);
+    }
+    // "1" (oldest) evicted; the re-queued result is NEVER the eviction victim.
+    assert.deepEqual(drained, ["late", "2", "3"]);
+  });
+
   it("requeue puts a message back in front, deduped by id", () => {
     const q = queue();
     q.push({ id: "y", text: "second" }, 0);

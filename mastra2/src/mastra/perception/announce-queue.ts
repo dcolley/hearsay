@@ -81,7 +81,7 @@ export class AnnounceQueue {
     this.items.push(item);
     let evicted: AnnounceMessage | null = null;
     while (this.items.length > this.max) {
-      evicted = this.items.shift() ?? evicted;
+      evicted = this.evictOldest() ?? evicted;
     }
     for (const fn of this.listeners) {
       try {
@@ -126,6 +126,21 @@ export class AnnounceQueue {
     return null;
   }
 
+  /**
+   * Remove and return the OLDEST queued message (smallest `pushedAt`,
+   * position ties broken by queue order). One eviction policy for every
+   * overflow path: "past the cap the oldest evicts" (ADR-008 Numbers table),
+   * whether the new item arrived via push or via requeue.
+   */
+  private evictOldest(): AnnounceMessage | null {
+    if (this.items.length === 0) return null;
+    let oldest = 0;
+    for (let i = 1; i < this.items.length; i++) {
+      if (this.items[i]!.pushedAt < this.items[oldest]!.pushedAt) oldest = i;
+    }
+    return this.items.splice(oldest, 1)[0] ?? null;
+  }
+
   /** Number of live (non-stale as of `t_ms`) messages. */
   size(t_ms?: number): number {
     if (t_ms === undefined) return this.items.length;
@@ -145,11 +160,12 @@ export class AnnounceQueue {
   /**
    * Re-queue an in-flight message (barge during the announce itself). It
    * goes to the FRONT so order is preserved, deduped by id so an interrupted
-   * result can never be spoken twice.
+   * result can never be spoken twice. Past the cap the OLDEST evicts — the
+   * same policy as `push`, never the freshly re-queued result.
    */
   requeue(msg: { id: string; tool?: string; text: string }, t_ms: number): void {
     if (this.items.some((m) => m.id === msg.id)) return;
     this.items.unshift({ id: msg.id, tool: msg.tool, text: msg.text, pushedAt: t_ms });
-    while (this.items.length > this.max) this.items.pop();
+    while (this.items.length > this.max) this.evictOldest();
   }
 }
