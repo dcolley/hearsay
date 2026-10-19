@@ -253,6 +253,13 @@ export class PerceptionSession {
   private announceDraining = false;
   /** Messages spoken by the current announce drain (barge re-queues these). */
   private announceActive: AnnounceMessage[] | null = null;
+  /**
+   * Progress inside `announceActive`: how many messages spoke to the END
+   * through the FIFO (a fragment interrupted by a barge is NOT complete).
+   * A barge re-queues only `announceActive.slice(announceSpoken)` — the
+   * unfinished tail — so an already-spoken message can never play twice.
+   */
+  private announceSpoken = 0;
   /** Wall-clock ms of the most recent user speech event (frame/utterance/barge). */
   private lastSpeechAtMs = 0;
 
@@ -450,6 +457,7 @@ export class PerceptionSession {
     // A fresh conversation drops pending async results too.
     this.announceQueue.clear();
     this.announceActive = null;
+    this.announceSpoken = 0;
     if (this.playbackDoneWaiter) {
       clearTimeout(this.playbackDoneWaiter.timer);
       this.playbackDoneWaiter.resolve();
@@ -1871,12 +1879,15 @@ export class PerceptionSession {
 
     this.announceDraining = true;
     this.announceActive = batch;
+    this.announceSpoken = 0;
     // Fresh controller so a barge-in during the announce itself can stop it
     // (speakFragment breaks on the abort signal), same contract as a turn.
     const speakAbort = new AbortController();
     this.turnAbort = speakAbort;
     try {
-      for (const msg of batch) this.enqueueSpeak(msg.text);
+      batch.forEach((msg, index) =>
+        this.enqueueAnnounceSpeak(msg, index, batch, speakAbort),
+      );
       await this.drainSpeakQueue();
       const afterQueue: AgentState = this.getState();
       if (!speakAbort.signal.aborted && afterQueue === "speaking") {
@@ -1900,18 +1911,48 @@ export class PerceptionSession {
   }
 
   /**
-   * A barge-in that caught the announce mid-speech: re-queue what was in
-   * flight so the result lands at the next silent moment - interruption
-   * must not lose the result (ADR-008).
+   * Announce-specific FIFO enqueue: like `enqueueSpeak` but it records
+   * per-message speak progress (`announceSpoken`) so a barge can re-queue
+   * exactly the unfinished tail. A message counts as spoken only when its
+   * fragment ran to the end without the batch being aborted.
+   */
+  private enqueueAnnounceSpeak(
+    msg: AnnounceMessage,
+    index: number,
+    batch: AnnounceMessage[],
+    speakAbort: AbortController,
+  ): void {
+    const next = this.speakQueue.then(async () => {
+      // The batch was barged (or another controller took the FIFO): do not
+      // start this fragment — it is already back in the queue for a retry,
+      // and speaking it here as well would announce it twice.
+      if (speakAbort.signal.aborted || this.turnAbort !== speakAbort) return;
+      await this.speakFragment(msg.text);
+      if (!speakAbort.signal.aborted && this.announceActive === batch) {
+        this.announceSpoken = Math.max(this.announceSpoken, index + 1);
+      }
+    });
+    this.speakQueue = next.catch((err: unknown) => {
+      console.error("[perception] speak queue error:", err);
+    });
+  }
+
+  /**
+   * A barge-in that caught the announce mid-speech: re-queue what was NOT
+   * finished so the result lands at the next silent moment - interruption
+   * must not lose a result (ADR-008). Only the tail past `announceSpoken`
+   * goes back: messages already spoken to the end must never play twice.
    */
   private requeueAnnouncements(t_ms: number): void {
     if (!this.announceActive) return;
+    const tail = this.announceActive.slice(this.announceSpoken);
+    this.announceActive = null;
+    if (tail.length === 0) return;
     const now = Date.now();
-    for (const msg of [...this.announceActive].reverse()) {
+    for (const msg of [...tail].reverse()) {
       this.announceQueue.requeue({ id: msg.id, tool: msg.tool, text: msg.text }, now);
     }
-    this.metric("announce_requeued", t_ms, { count: this.announceActive.length });
-    this.announceActive = null;
+    this.metric("announce_requeued", t_ms, { count: tail.length });
   }
 
   private async speakFragment(text: string): Promise<void> {
@@ -1969,6 +2010,7 @@ export class PerceptionSession {
     this.bridge.clear();
     this.announceQueue.clear();
     this.announceActive = null;
+    this.announceSpoken = 0;
     this.clearIncompleteHold();
     if (this.listenArmTimer) clearTimeout(this.listenArmTimer);
     if (this.playbackDoneWaiter) {

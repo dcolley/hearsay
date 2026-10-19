@@ -56,6 +56,13 @@ function makeSession(
   modeRef: { current: Mode },
   echoTool: ReturnType<typeof withToolContract>,
   speakDelayRef: { current: number },
+  opts?: {
+    /** Record the text only when the fragment synthesises to completion
+     * (an interrupted attempt leaves no trace in `spoken`). */
+    logOnComplete?: boolean;
+    /** Every synthesise call appends here the moment it starts. */
+    started?: string[];
+  },
 ) {
   const hooks: { session: PerceptionSession } = {} as {
     session: PerceptionSession;
@@ -103,6 +110,16 @@ function makeSession(
     asr: { finalize: async () => "", reset: () => {} },
     tts: {
       synthesize: async function* (text: string) {
+        opts?.started?.push(text);
+        if (opts?.logOnComplete) {
+          // Completion marker sits AFTER the yield: a barge that breaks the
+          // speak loop closes the generator, skipping it, so an interrupted
+          // attempt leaves no trace in `spoken`.
+          if (speakDelayRef.current > 0) await delay(speakDelayRef.current);
+          yield { text, mime: "text/plain" };
+          spoken.push(text);
+          return;
+        }
         spoken.push(text);
         // A slow fake voice keeps a fragment speaking long enough to barge
         // mid-announce when the test wants that.
@@ -215,5 +232,54 @@ describe("session: deferred announcements (ADR-008)", () => {
     await delay(500);
     assert.equal(spoken.filter((s) => s.startsWith("Echo:")).length, 2);
     assert.equal(session.announceQueue.size(), 0, "queue must finally drain empty");
+  });
+
+  it("mid-batch barge re-announces only the unfinished tail, each message exactly once", async () => {
+    // Two queued results drain as one batch. A barge DURING the second
+    // message must re-queue only what never spoke to the end: the first
+    // message must never be re-announced (it already played in full) and the
+    // interrupted second must land exactly once more. (Review finding: the
+    // whole active batch used to go back, so the first message played twice.)
+    const spoken: string[] = [];
+    const started: string[] = [];
+    const modeRef: { current: Mode } = { current: "reply" };
+    const speakDelayRef = { current: 5 };
+    const ALPHA = "Alpha result is ready.";
+    const BETA = "Beta result is ready.";
+    const session = makeSession(spoken, modeRef, makeEchoTool(50), speakDelayRef, {
+      logOnComplete: true,
+      started,
+    });
+
+    // Queue both results directly; a quiet room turns them into one batch.
+    const t0 = Date.now();
+    session.announceQueue.push({ id: "alpha-1", tool: "demo_echo", text: ALPHA }, t0);
+    session.announceQueue.push({ id: "beta-1", tool: "demo_echo", text: BETA }, t0);
+
+    // Alpha speaks to completion, then Beta starts (slowly) but has not.
+    speakDelayRef.current = 400;
+    await waitUntil(
+      () => spoken.includes(ALPHA) && started.includes(BETA),
+      4000,
+      "alpha complete, beta started",
+    );
+    // Barge while the second message is mid-speak.
+    session.bargeIn(Date.now());
+    speakDelayRef.current = 5;
+
+    // The unfinished tail comes back once: exactly one full delivery of each.
+    await waitUntil(
+      () => spoken.filter((s) => s === BETA).length === 1,
+      5000,
+      "beta re-announced to completion",
+    );
+    await delay(700);
+    assert.deepEqual(
+      spoken,
+      [ALPHA, BETA],
+      `each message exactly once across a mid-batch barge, got ${JSON.stringify(spoken)}`,
+    );
+    assert.equal(started.filter((s) => s === ALPHA).length, 1, "alpha never re-started");
+    assert.equal(session.announceQueue.size(), 0);
   });
 });
