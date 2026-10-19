@@ -7,7 +7,6 @@
 export type PlaybackStopReason =
   | "barge_in" // user interrupted while speaking: ramp, don't clip
   | "soft_release" // false candidate cleared; duck/resume handled elsewhere
-  | "turn_end" // natural drain of the queue, nothing to fade
   | "session_end"; // teardown while audible: same courtesy as barge
 
 /** Module default; override via BARGE_FADE_MS (NEXT_PUBLIC_ prefix for Next). */
@@ -41,14 +40,4 @@ export function fadeMsFor(
 ): number {
   if (!Number.isFinite(bargeFadeMs) || bargeFadeMs < 0) return 0;
   return FADES_ON_STOP.has(reason) ? Math.round(bargeFadeMs) : 0;
-}
-
-/** State-driven stop: what fade is owed when cutting audio in `state`. */
-export function fadeForState(
-  state: string,
-  bargeFadeMs: number = bargeFadeMsFromEnv(),
-): number {
-  return state === "speaking" || state === "interrupted"
-    ? fadeMsFor("barge_in", bargeFadeMs)
-    : 0;
 }

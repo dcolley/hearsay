@@ -169,7 +169,8 @@ export class TtsPlayback {
 
   /** Tear down WebRTC AEC peers (call when Presence session ends). */
   dispose(): void {
-    this.stop();
+    // Teardown while audible gets the same courtesy fade as barge (ADR-006).
+    this.stop("session_end");
     this.aec.close();
   }
 
