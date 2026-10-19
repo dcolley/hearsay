@@ -164,13 +164,21 @@ export class GatedTurnDetector implements TurnAdapter {
   private base: AdaptiveSilenceTurnDetector;
   private classifier: TurnClassifier | null;
   private readonly graceMs: number;
-  private windowProvider: () => Float32Array = () => EMPTY_WINDOW;
+  private windowProvider: () => Float32Array = () => new Float32Array(EMPTY_WINDOW);
   private state: "armed" | "pending" | "grace" | "commit-next" = "armed";
   private generation = 0;
   private disagreeCount = 0;
   private graceFrom: number | null = null;
   private lastT = 0;
   private missingWarned = false;
+  /** Frame time when the current classifier run started (caps "pending"). */
+  private pendingFrom = 0;
+  private throwWarned = false;
+  private metricHook?: (
+    name: string,
+    t_ms: number,
+    detail?: Record<string, string | number | boolean>,
+  ) => void;
 
   constructor(
     base: AdaptiveSilenceTurnDetector,
@@ -204,6 +212,13 @@ export class GatedTurnDetector implements TurnAdapter {
     if (this.state === "commit-next") {
       this.state = "armed";
       this.disagreeCount = 0;
+      if (result.isSpeech) {
+        // Speech resumed before the verdict could land: the user is still
+        // talking, so the pending commit is void. Hand the frame to the base
+        // so the ongoing utterance stays tracked.
+        this.base.onVad(result, t_ms);
+        return false;
+      }
       return true;
     }
     const baseSays = this.base.onVad(result, t_ms);
@@ -214,6 +229,13 @@ export class GatedTurnDetector implements TurnAdapter {
         this.generation++;
         this.state = "armed";
         this.base.reset();
+      } else if (t_ms - this.pendingFrom >= this.graceMs) {
+        // Verdict stuck (hung promise): hard-cap pending with graceMs and
+        // fall through the bounded grace timer; the late answer is ignored
+        // (stale generation).
+        this.generation++;
+        this.state = "grace";
+        this.graceFrom = t_ms;
       }
       return false;
     }
@@ -255,14 +277,42 @@ export class GatedTurnDetector implements TurnAdapter {
     return this.state;
   }
 
+  /** Wire the session's metric emitter so gate diagnostics reach the bus. */
+  setMetricHook(
+    fn: (
+      name: string,
+      t_ms: number,
+      detail?: Record<string, string | number | boolean>,
+    ) => void,
+  ): void {
+    this.metricHook = fn;
+  }
+
   private classifierRun(): void {
     const gen = ++this.generation;
     this.state = "pending";
+    this.pendingFrom = this.lastT;
     const pcm = this.windowProvider();
     this.classifier!.isEndOfTurn(pcm).then(
       (verdict) => this.onVerdict(verdict, gen),
-      () => this.onVerdict(null, gen),
+      () => {
+        this.onClassifierThrow();
+        this.onVerdict(null, gen);
+      },
     );
+  }
+
+  /** One-shot diagnostics for classifier failures (ADR-005 fallback path). */
+  private onClassifierThrow(): void {
+    if (this.throwWarned) return;
+    this.throwWarned = true;
+    console.warn(
+      "[turn] smartturn classifier failed - run: yarn models; falling back to adaptive-silence",
+    );
+    this.metricHook?.("turn_gate", this.lastT, {
+      classifier: "error",
+      mode: "adaptive-silence",
+    });
   }
 
   private onVerdict(verdict: boolean | null, gen: number): void {
@@ -289,6 +339,11 @@ export class GatedTurnDetector implements TurnAdapter {
   }
 }
 
+/**
+ * Shared all-zeros window handed to the classifier before any PCM flows.
+ * Copied per call by the default windowProvider so a mutating caller can
+ * never poison the window for every gate that uses the default.
+ */
 const EMPTY_WINDOW = new Float32Array(16_000 * 8);
 
 /**

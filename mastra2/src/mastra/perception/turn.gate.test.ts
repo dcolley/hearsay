@@ -18,12 +18,15 @@ type Verdict = boolean | null;
 
 class StubClassifier {
   calls = 0;
+  /** Every PCM window handed to the classifier (for buffer-identity checks). */
+  windows: Float32Array[] = [];
   /** Queued per-call outcomes; "hold" parks the promise until resolveNext. */
   queue: (Verdict | "throw" | "hold")[] = [];
   private parked: ((v: Verdict) => void)[] = [];
 
-  isEndOfTurn(): Promise<boolean | null> {
+  isEndOfTurn(pcm: Float32Array): Promise<boolean | null> {
     this.calls += 1;
+    this.windows.push(pcm);
     const outcome = this.queue.shift() ?? null;
     if (outcome === "throw") return Promise.reject(new Error("classifier boom"));
     if (outcome === "hold") {
@@ -160,5 +163,95 @@ describe("GatedTurnDetector", () => {
     assert.equal(missing.classifierMissing, true);
     const ok = new GatedTurnDetector(new AdaptiveSilenceTurnDetector(), new StubClassifier());
     assert.equal(ok.classifierMissing, false);
+  });
+
+  it("speech resuming during commit-next discards the pending commit", async () => {
+    const stub = new StubClassifier();
+    stub.queue.push(true, true);
+    const det = new GatedTurnDetector(new AdaptiveSilenceTurnDetector(), stub, { graceMs: 600 });
+    openUtterance(det);
+    assert.equal(det.onVad(silenceFrame(), 1550), false);
+    await pump();
+    assert.equal(det.debugState(), "commit-next");
+    // User resumes speech before the commit lands: verdict void, no commit.
+    assert.equal(det.onVad(speechFrame(), 1560), false);
+    assert.equal(det.debugState(), "armed");
+    // The genuine later commit path still works: speech 1560..2600, silence,
+    // second classifier run says agree -> commit.
+    for (let t = 1590; t <= 2600; t += 30) det.onVad(speechFrame(), t);
+    let commit = false;
+    for (let t = 2630; t <= 3150 && !commit; t += 30) commit = det.onVad(silenceFrame(), t);
+    await pump();
+    if (!commit) commit = det.onVad(silenceFrame(), 3180);
+    assert.equal(commit, true, "a genuine later commit must still fire");
+    assert.equal(stub.calls, 2);
+  });
+
+  it("classifier throw: one-shot warning + turn_gate metric, passthrough commit", async () => {
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...a: unknown[]) => {
+      warnings.push(a.map(String).join(" "));
+    };
+    const metrics: { name: string; detail: Record<string, unknown> }[] = [];
+    try {
+      const stub = new StubClassifier();
+      stub.queue.push("throw", "throw");
+      const det = new GatedTurnDetector(new AdaptiveSilenceTurnDetector(), stub, { graceMs: 600 });
+      det.setMetricHook((name, _t_ms, detail) => metrics.push({ name, detail: detail ?? {} }));
+      openUtterance(det);
+      assert.equal(det.onVad(silenceFrame(), 1550), false);
+      await pump(); // throw -> null verdict -> commit-next (passthrough)
+      assert.equal(det.onVad(silenceFrame(), 1580), true);
+      // Second classifier run (another throw): diagnostics must NOT repeat.
+      for (let t = 1610; t <= 2600; t += 30) det.onVad(speechFrame(), t);
+      let again = false;
+      for (let t = 2630; t < 3150 && !again; t += 30) again = det.onVad(silenceFrame(), t);
+      await pump();
+      if (!again) again = det.onVad(silenceFrame(), 3180);
+      assert.equal(again, true, "second throw still passes through");
+      assert.equal(stub.calls, 2);
+    } finally {
+      console.warn = origWarn;
+    }
+    assert.equal(warnings.filter((w) => w.includes("yarn models")).length, 1);
+    assert.equal(metrics.length, 1);
+    assert.equal(metrics[0].name, "turn_gate");
+    assert.equal(metrics[0].detail.classifier, "error");
+    assert.equal(metrics[0].detail.mode, "adaptive-silence");
+  });
+
+  it("hung classifier promise is hard-capped by graceMs", async () => {
+    const stub = new StubClassifier();
+    stub.queue.push("hold");
+    const det = new GatedTurnDetector(new AdaptiveSilenceTurnDetector(), stub, { graceMs: 600 });
+    openUtterance(det);
+    assert.equal(det.onVad(silenceFrame(), 1550), false); // parked in pending
+    assert.equal(det.debugState(), "pending");
+    // Verdict never lands; silence keeps arriving. Pending must not outlive
+    // graceMs: at t=2150 it moves to grace, commit at t=2750 regardless.
+    let commit = false;
+    for (let t = 1580; t <= 2900 && !commit; t += 30) commit = det.onVad(silenceFrame(), t);
+    assert.equal(commit, true);
+    stub.resolveNext(true); // late agree must be ignored (stale generation)
+    await pump();
+    assert.equal(det.onVad(silenceFrame(), 2930), false);
+  });
+
+  it("default empty window handed to the classifier is a fresh copy per call", async () => {
+    const stub = new StubClassifier();
+    stub.queue.push(false, false);
+    const det = new GatedTurnDetector(new AdaptiveSilenceTurnDetector(), stub, { graceMs: 600 });
+    openUtterance(det);
+    assert.equal(det.onVad(silenceFrame(), 1550), false);
+    await pump(); // disagree -> grace
+    for (let t = 1560; t <= 2700; t += 30) det.onVad(speechFrame(), t);
+    let again = false;
+    for (let t = 2730; t < 3300 && !again; t += 30) again = det.onVad(silenceFrame(), t);
+    await pump();
+    assert.equal(stub.calls, 2);
+    assert.equal(stub.windows.length, 2);
+    assert.notEqual(stub.windows[0], stub.windows[1], "must not share one buffer");
+    assert.ok(stub.windows[0].every((v) => v === 0));
   });
 });
