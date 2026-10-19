@@ -29,6 +29,8 @@ import {
 import { toSpokenReply } from "./reply-text.ts";
 import { NOT_CAUGHT, hasUnreadableScript } from "./speakable.ts";
 import { firstCompleteSentence } from "./sentences.ts";
+import { SpeculativeTurn, type SpeculationState } from "./speculation.ts";
+import type { MemoryWriteGate } from "../memory/hearsay-memory.ts";
 import { ProgressNarrator } from "./progress.ts";
 import { toolFillerPhrase } from "./tool-fillers.ts";
 import type { TurnAdapter } from "./turn.ts";
@@ -97,6 +99,25 @@ const UTTERANCE_WINDOW_SAMPLES = 16_000 * 8;
 const FIRST_AUDIO_DEADLINE_MS = 900;
 const MIN_UTTERANCE_SAMPLES = 16_000 * 0.35;
 const PLAYBACK_DONE_TIMEOUT_MS = 45_000;
+
+/**
+ * One in-flight speculative run (ADR-007). `run` is the speculative think()
+ * (stream held, tools off, memory gated); `settle` resolves when the turn
+ * is confirmed (commit) or abandoned (discard) so a parked stream loop can
+ * finish either way.
+ */
+type SpeculationRun = {
+  turn: SpeculativeTurn;
+  abort: AbortController;
+  text: string | null;
+  /** ASR finalize started at likely-EOU; resolves null if discarded. */
+  finalized: Promise<string | null>;
+  run?: Promise<void>;
+  runStarted: boolean;
+  settled: boolean;
+  waitSettle: Promise<"committed" | "discarded">;
+  settle(r: "committed" | "discarded"): void;
+};
 
 export class PerceptionSession {
   readonly bus = new EventBus<PerceptionEvents>();
@@ -183,6 +204,15 @@ export class PerceptionSession {
     timer: ReturnType<typeof setTimeout>;
   };
 
+  /**
+   * Speculative generation (ADR-007). speculateMs is SPECULATE_MS (0 = off,
+   * behaviour bit-identical to base). The active run (null when idle/off).
+   */
+  private readonly speculateMs: number;
+  private spec: SpeculationRun | null = null;
+  /** Re-entrancy guard for the commit path (speculation awaits ASR). */
+  private committing = false;
+
   constructor(private readonly deps: SessionDeps) {
     this.halfDuplex = deps.halfDuplex ?? true;
     this.bargeInEnabled = deps.bargeInEnabled ?? false;
@@ -219,6 +249,27 @@ export class PerceptionSession {
     this.scene = deps.vision.getScene();
     this._threadId = isThreadId(deps.threadId) ? deps.threadId.trim() : randomUUID();
     this.resourceId = deps.resourceId || hearsayResourceId;
+
+    // ADR-007 speculation: off by default (SPECULATE_MS=0 -> bit-identical).
+    // In scope for ASR_MODE=http|mock only; browser STT owns commit otherwise.
+    this.speculateMs = Number(process.env.SPECULATE_MS || 0) || 0;
+    if (this.speculateMs > 0) {
+      if (this.clientOwnsAsr) {
+        console.warn(
+          "[speculation] SPECULATE_MS>0 but ASR_MODE=browser - out of scope, speculation stays off",
+        );
+      } else {
+        const d = deps.turn as Partial<{
+          setLikelyEouCallback: (cb: ((t_ms: number) => void) | null) => void;
+        }>;
+        if (typeof d.setLikelyEouCallback === "function") {
+          d.setLikelyEouCallback((t_ms) => this.onLikelyEou(t_ms));
+          console.log(
+            `[speculation] on budget=${this.speculateMs}ms advance=${Number(process.env.SPECULATE_ADVANCE_MS || 200)}ms`,
+          );
+        }
+      }
+    }
   }
 
   /**
@@ -300,6 +351,7 @@ export class PerceptionSession {
    */
   async clearConversation(): Promise<{ threadId: string; resourceId: string }> {
     this.clearIncompleteHold();
+    if (this.spec) this.discardSpeculation(this.spec, "clear-conversation");
     this.deps.tts.stop();
     this.turnAbort?.abort();
     // Fresh controller so we can speak a short confirmation after the wipe
@@ -453,6 +505,12 @@ export class PerceptionSession {
 
     if (this.listenSustain.feed(vad.isSpeech)) {
       this.utteranceOpened = true;
+    }
+
+    // ADR-007: the user resumed before the speculation was confirmed -
+    // abandon it cleanly and keep the ordinary commit path timings.
+    if (this.spec && this.spec.turn.active && vad.isSpeech) {
+      this.discardSpeculation(this.spec, "resume");
     }
 
     // Buffer speech early; only open the turn after sustain
@@ -856,7 +914,31 @@ export class PerceptionSession {
     if (this.thinking || this.state === "thinking" || this.state === "speaking") {
       return;
     }
+    if (this.committing) return;
+    this.committing = true;
+    try {
+      // ADR-007: speculation was started at likely-EOU. ASR may still be
+      // finalizing; await it (the utterance buffer is still buffered for a
+      // fallback commit) and promote if it is committable.
+      if (this.spec) {
+        const spec = this.spec;
+        const text = await spec.finalized;
+        if (this.spec !== spec) return; // discarded while we waited
+        if (text !== null && spec.turn.state === "speculative" && spec.turn.promote()) {
+          this.spec = null;
+          await this.commitSpeculative(spec, text, t_ms);
+          return;
+        }
+        this.discardSpeculation(spec, "commit-fallback");
+      }
+      await this.commitTurnNormal(t_ms);
+    } finally {
+      this.committing = false;
+    }
+  }
 
+  /** Ordinary (non-speculated) PCM commit: finalize ASR now, then think. */
+  private async commitTurnNormal(t_ms: number): Promise<void> {
     const pcm = this.concatPcm();
     this.pcmChunks = [];
     this.pcmSamples = 0;
@@ -898,18 +980,216 @@ export class PerceptionSession {
     }
   }
 
-  private async think(): Promise<void> {
+  /**
+   * Promote a speculative run to a confirmed turn. Called with the turn
+   * already promoted (`spec.turn.promote()`). Held sentences go to the
+   * speak FIFO first; then the still-running stream keeps producing into
+   * the same FIFO (generation is NOT restarted); memory pending writes are
+   * persisted exactly once and the write gate opens.
+   */
+  private async commitSpeculative(
+    spec: SpeculationRun,
+    text: string,
+    t_ms: number,
+  ): Promise<void> {
+    // The utterance was finalized early - clear buffers the same way a
+    // normal commit would.
+    this.pcmChunks = [];
+    this.pcmSamples = 0;
+    this.windowReset();
+    this.deps.turn.reset();
+    this.deps.vad.reset();
+    this.listenSustain.reset();
+    this.wasSpeech = false;
+    this.utteranceOpened = false;
+
+    this.metric("speculation_commit", t_ms, {
+      held_sentences: spec.turn.held.length,
+      ran_ms: t_ms - spec.turn.startedAt,
+    });
+    this.utterance = text;
+    this.utteranceWallStartedAt = performance.now();
+    this.firstTtsLogged = false;
+    this.thinking = true;
+    this.turnAbort = spec.abort;
+    this.setState("thinking");
+
+    // 1) Promote: speak the held buffer through the FIFO, in order.
+    for (const sentence of [...spec.turn.held]) this.enqueueSpeak(sentence);
+    spec.turn.drainHeld();
+
+    // 2) Persist the speculative run's memory writes exactly once, then open
+    //    the write gate for the rest of the live stream.
+    await this.gateFlushAndUnblock();
+
+    // 3) Release a parked speculative loop; then let the run finish.
+    spec.settle("committed");
+    this.bus.emit("end_of_turn", { text, t_ms });
+    if (!spec.runStarted) {
+      void this.think();
+      return;
+    }
+    await spec.run;
+  }
+
+  /**
+   * Likely-EOU hook (ADR-007), fired once per utterance by the turn detector
+   * just before it would commit. Starts ASR finalize + speculative LLM
+   * generation; output is held until commitTurn confirms the turn.
+   */
+  private onLikelyEou(t_ms: number): void {
+    if (this.speculateMs <= 0 || this.clientOwnsAsr) return;
+    if (this.spec || this.thinking || this.committing) return;
+    if (this.state !== "listening" && this.state !== "idle") return;
+    if (!this.utteranceOpened) return;
+    const pcm = this.concatPcm();
+    if (pcm.length < MIN_UTTERANCE_SAMPLES) return;
+
+    let settle: (r: "committed" | "discarded") => void = () => {};
+    const waitSettle = new Promise<"committed" | "discarded">((resolve) => {
+      settle = (r) => {
+        if (!spec.settled) {
+          spec.settled = true;
+          resolve(r);
+        }
+      };
+    });
+    const spec: SpeculationRun = {
+      turn: new SpeculativeTurn({
+        budgetMs: this.speculateMs,
+        onBudgetExpired: () => this.discardSpeculation(spec, "budget"),
+      }),
+      abort: new AbortController(),
+      text: null,
+      finalized: Promise.resolve(null),
+      runStarted: false,
+      settled: false,
+      waitSettle,
+      settle: (r) => settle(r),
+    };
+    spec.turn.begin(t_ms);
+    this.spec = spec;
+    this.metric("speculation_start", t_ms, { pcm_samples: pcm.length });
+    spec.finalized = this.finalizeSpeculative(spec, pcm);
+  }
+
+  /**
+   * Speculative ASR finalize, then (unless excluded) start the held
+   * generation run. Excluded: empty transcript, or utterances whose normal
+   * path has tool/side effects before answering (screenshot / webcam
+   * grounding, offer_choices menus) - speculation runs must be effect-free.
+   */
+  private async finalizeSpeculative(
+    spec: SpeculationRun,
+    pcm: Int16Array,
+  ): Promise<string | null> {
+    let text = "";
+    try {
+      text = (await this.deps.asr.finalize(pcm)).trim();
+      this.deps.asr.reset();
+    } catch (err) {
+      console.warn(
+        "[speculation] ASR finalize failed:",
+        err instanceof Error ? err.message : err,
+      );
+      if (this.spec === spec) this.discardSpeculation(spec, "asr-error");
+      return null;
+    }
+    if (this.spec !== spec || spec.turn.state !== "speculative") return null;
+    if (!hasSpeechContent(text)) {
+      this.discardSpeculation(spec, "empty");
+      return null;
+    }
+    if (
+      needsScreenshot(text) ||
+      needsLiveVision(text) ||
+      wantsOfferChoices(text)
+    ) {
+      this.discardSpeculation(spec, "needs-effects");
+      return null;
+    }
+    spec.text = text;
+    // think(spec) builds messages from this.utterance; a later ordinary
+    // commit re-reads this.utterance after its own finalize.
+    this.utterance = text;
+    this.gateSetWritesBlocked(true);
+    this.startSpecRun(spec);
+    return text;
+  }
+
+  /** Start (once) the speculative generation run for a finalized utterance. */
+  private startSpecRun(spec: SpeculationRun): void {
+    if (spec.runStarted) return;
+    spec.runStarted = true;
+    spec.run = this.think(spec);
+  }
+
+  /**
+   * Abandon a speculation: abort the stream, drop the held buffer and all
+   * timers, drop buffered memory writes, open the gate again. Structurally
+   * leaves nothing behind (ADR-007; the mastra#22873 bug shape).
+   */
+  private discardSpeculation(spec: SpeculationRun, reason: string): void {
+    const wasSpeculative = spec.turn.state === "speculative";
+    spec.turn.discard();
+    spec.abort.abort();
+    this.gateClearAndUnblock();
+    if (this.spec === spec) this.spec = null;
+    spec.settle("discarded");
+    if (wasSpeculative) {
+      this.metric("speculation_discard", this.clientNow(), { reason });
+    }
+  }
+
+  // --- memory write gate (ADR-007 step 1) ---------------------------------
+
+  private gate(): MemoryWriteGate | null {
+    const m = this.deps.memory as unknown as Partial<MemoryWriteGate>;
+    return typeof m.blockWrites === "function" ? (m as MemoryWriteGate) : null;
+  }
+
+  private gateSetWritesBlocked(on: boolean): void {
+    this.gate()?.blockWrites(on);
+  }
+
+  private async gateFlushAndUnblock(): Promise<void> {
+    const g = this.gate();
+    if (!g) return;
+    await g.flushPending();
+    g.blockWrites(false);
+  }
+
+  private gateClearAndUnblock(): void {
+    const g = this.gate();
+    if (!g) return;
+    g.clearPending();
+    g.blockWrites(false);
+  }
+
+  /** Test/debug hook: current speculation state, "off" when disabled. */
+  debugSpeculation(): SpeculationState | "off" {
+    if (this.speculateMs <= 0) return "off";
+    return this.spec?.turn.state ?? "idle";
+  }
+
+  private async think(spec?: SpeculationRun): Promise<void> {
     if (!hasSpeechContent(this.utterance)) {
-      this.setState("listening");
+      if (!spec) this.setState("listening");
       return;
     }
 
-    if (this.thinking) {
-      this.turnAbort?.abort();
+    if (spec) {
+      // Speculative phase: the session keeps listening; commit sets thinking
+      // state and adopts spec.abort. No state flips, no progress narration
+      // (nothing audible is allowed before the user commits).
+    } else {
+      if (this.thinking) {
+        this.turnAbort?.abort();
+      }
+      this.thinking = true;
+      this.turnAbort = new AbortController();
+      this.setState("thinking");
     }
-    this.thinking = true;
-    this.turnAbort = new AbortController();
-    this.setState("thinking");
     this.partialSpoken = "";
 
     // Progress speech (ADR-003): spoken updates while tools run. Narration is
@@ -922,15 +1202,16 @@ export class PerceptionSession {
       },
       () => performance.now(),
     );
-    const progressTimer = this.progressOpts.enabled
-      ? setInterval(() => {
-          if (this.turnAbort?.signal.aborted) return;
-          // While ask_user / offer_choices wait, the question is the update.
-          if (this.bridge.hasPending()) return;
-          const line = narrator.tick();
-          if (line) this.enqueueSpeak(line);
-        }, 500)
-      : undefined;
+    const progressTimer =
+      this.progressOpts.enabled && !spec
+        ? setInterval(() => {
+            if (this.turnAbort?.signal.aborted) return;
+            // While ask_user / offer_choices wait, the question is the update.
+            if (this.bridge.hasPending()) return;
+            const line = narrator.tick();
+            if (line) this.enqueueSpeak(line);
+          }, 500)
+        : undefined;
 
     console.log(
       `[perception] think() start thread=${this.threadId} utterance=${JSON.stringify(this.utterance).slice(0, 120)}`,
@@ -942,15 +1223,17 @@ export class PerceptionSession {
 
     // Ground visual questions before the agent answers (Spark chat cannot see
     // tool-result images). Screen/UI → screenshot; physical scene → webcam.
+    // Speculative runs skip this: client capture is a tool effect and effects
+    // before commit are out of scope (such utterances are discarded earlier).
     let userContent = this.utterance;
-    if (needsScreenshot(this.utterance)) {
+    if (!spec && needsScreenshot(this.utterance)) {
       const grounded = await this.captureAndDescribeScreen(this.utterance);
       if (grounded) {
         userContent = `${this.utterance}\n\n[Live screen — trust this over memory or earlier guesses]: ${grounded}\n\nDo not call capture_screenshot again this turn; the display is already described above.`;
       } else {
         userContent = `${this.utterance}\n\n[Screen capture unavailable or cancelled. Ask the user to allow screen/window share, or say you cannot see the display. Do not invent UI.]`;
       }
-    } else if (needsLiveVision(this.utterance)) {
+    } else if (!spec && needsLiveVision(this.utterance)) {
       const grounded = await this.captureAndDescribe(this.utterance);
       if (grounded) {
         userContent = `${this.utterance}\n\n[Live webcam — trust this over memory or earlier guesses]: ${grounded}`;
@@ -962,6 +1245,10 @@ export class PerceptionSession {
     const messages = [
       { role: "user" as const, content: userContent },
     ] as MessageListInput;
+
+    // ADR-007: speculative runs abort through spec.abort (owned by the
+    // speculation machinery); live runs through this.turnAbort.
+    const abortSignal = spec ? spec.abort.signal : this.turnAbort!.signal;
 
     const t0 = performance.now();
     let rawBuf = "";
@@ -978,11 +1265,19 @@ export class PerceptionSession {
       let pending = spoken.slice(spokenOffset);
       if (!pending.trim() && !forceRest) return;
 
+      // ADR-007: while a speculation is still uncommitted, generated
+      // sentences go to the HELD buffer - never spoken, never tts_flush.
+      // After commit (or with speculation off) they go to the speak FIFO.
+      const emitOrHold = (sentence: string): void => {
+        if (spec && spec.turn.state === "speculative") spec.turn.hold(sentence);
+        else this.enqueueSpeak(sentence);
+        spoke = true;
+      };
+
       if (forceRest) {
         const rest = pending.trim();
         if (rest) {
-          this.enqueueSpeak(rest);
-          spoke = true;
+          emitOrHold(rest);
           spokenOffset = spoken.length;
         }
         return;
@@ -1000,8 +1295,7 @@ export class PerceptionSession {
         pending = pending.slice(cut);
         spokenOffset = spoken.length - pending.length;
         if (sentence) {
-          this.enqueueSpeak(sentence);
-          spoke = true;
+          emitOrHold(sentence);
         }
       }
 
@@ -1013,8 +1307,7 @@ export class PerceptionSession {
         !/^\s*\{/.test(rawBuf.trim())
       ) {
         const fragment = pending.trim();
-        this.enqueueSpeak(fragment);
-        spoke = true;
+        emitOrHold(fragment);
         spokenOffset = spoken.length;
       }
     };
@@ -1025,13 +1318,19 @@ export class PerceptionSession {
         console.log("[perception] choice intent → require offer_choices");
       }
 
+      // ADR-007: speculative streams run with tools OFF - no tool may
+      // execute before the turn is committed. After commit the same stream
+      // continues (options were fixed at request time; a speculative stream
+      // that wanted a tool was discarded at first tool-call).
+      const specMode = !!spec && spec.turn.state === "speculative";
       const stream = await this.deps.agent.stream(messages, {
-        abortSignal: this.turnAbort.signal,
+        abortSignal,
         requestContext,
         memory: {
           thread: this.threadId,
           resource: this.resourceId,
         },
+        ...(specMode ? { toolChoice: "none" as const } : {}),
         ...(wantsMenu
           ? {
               toolChoice: "required" as const,
@@ -1042,7 +1341,7 @@ export class PerceptionSession {
 
       // fullStream so tool execute (ask_user / offer_choices HITL) actually runs
       for await (const chunk of stream.fullStream) {
-        if (this.turnAbort.signal.aborted) break;
+        if (abortSignal.aborted) break;
         if (chunk.type === "text-delta") {
           const payload = chunk.payload as { text?: string };
           const delta = typeof payload?.text === "string" ? payload.text : "";
@@ -1066,6 +1365,14 @@ export class PerceptionSession {
           const payload = chunk.payload as { toolName?: string };
           const toolName = payload?.toolName ?? "?";
           console.log(`[perception] ${chunk.type}: ${toolName}`);
+          if (chunk.type === "tool-call" && spec && spec.turn.state === "speculative") {
+            // The model wants a tool despite toolChoice:"none" (or a stream
+            // predating commit). Tool effects never run speculatively: drop
+            // this speculation; the confirmed turn re-runs the normal path.
+            console.log("[speculation] tool intent -> discard");
+            this.discardSpeculation(spec, "tool-intent");
+            break;
+          }
           if (chunk.type === "tool-call") {
             // ADR-003 owns known tools. Local fillers cover names the
             // narrator does not (and stay silent when a progress line fires).
@@ -1096,17 +1403,28 @@ export class PerceptionSession {
 
       const genAt = this.clientNow();
       this.metric("generation_complete", genAt, {
-        aborted: this.turnAbort.signal.aborted,
+        aborted: abortSignal.aborted,
         spoke,
+        ...(spec ? { speculation: true } : {}),
       });
 
-      if (!this.turnAbort.signal.aborted) {
+      if (!abortSignal.aborted) {
         await flushSpeakable(true);
+      }
+
+      if (spec) {
+        if (spec.turn.state === "discarded") return;
+        if (spec.turn.state === "speculative") {
+          // Stream finished before the turn was confirmed. Park until the
+          // session commits (promotes) or discards; then finish normally.
+          await spec.waitSettle;
+          if ((spec.turn.state as SpeculationState) === "discarded") return;
+        }
       }
 
       // ADR-004: the model said something, but none of it was speakable
       // (local-model CJK drift) — be honest out loud instead of silent.
-      if (!this.turnAbort.signal.aborted && !spoke && sawUnreadable) {
+      if (!abortSignal.aborted && !spoke && sawUnreadable) {
         this.enqueueSpeak(NOT_CAUGHT);
         spoke = true;
         this.metric("unreadable_answer_guarded", this.clientNow());
@@ -1116,23 +1434,35 @@ export class PerceptionSession {
       // declaring the end of speech — tts_flush must not arrive early.
       await this.drainSpeakQueue();
 
-      if (!this.turnAbort.signal.aborted) {
+      if (!abortSignal.aborted) {
         if (spoke) {
           // Stay speaking until client drains TTS queue (after flush)
           this.bus.emit("tts_flush", { t_ms: this.clientNow() });
           await this.waitForPlaybackDone();
         }
-        if (!this.turnAbort.signal.aborted) {
+        if (!abortSignal.aborted) {
           const now = this.clientNow();
           this.bus.emit("tts_end", { t_ms: now });
           this.beginListenArm(now);
           this.setState("listening");
         }
       } else {
-        await this.persistHeardOnlyInterrupt();
+        // A discarded speculation never spoke and never persisted: skip the
+        // heard-only interrupt bookkeeping entirely.
+        if (!spec || spec.turn.state !== "discarded") {
+          await this.persistHeardOnlyInterrupt();
+        }
       }
     } catch (err) {
-      if (this.turnAbort.signal.aborted) {
+      if (spec && spec.turn.state === "discarded") {
+        // speculative stream aborted by design - silent, no memory, no audio
+        return;
+      }
+      if (spec && spec.turn.state === "speculative" && abortSignal.aborted) {
+        this.discardSpeculation(spec, "stream-aborted");
+        return;
+      }
+      if (abortSignal.aborted) {
         await this.persistHeardOnlyInterrupt();
         this.beginListenArm(this.clientNow());
         this.setState("listening");
@@ -1364,6 +1694,7 @@ export class PerceptionSession {
 
   reset(): void {
     this.turnAbort?.abort();
+    if (this.spec) this.discardSpeculation(this.spec, "reset");
     this.deps.tts.stop();
     this.deps.vad.reset();
     this.deps.turn.reset();
