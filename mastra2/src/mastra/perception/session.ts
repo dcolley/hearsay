@@ -72,6 +72,12 @@ export type SessionDeps = {
   listenArmMs?: number;
   /** Extra ms past the last issued audio chunk before barge is allowed (ADR-006). */
   echoMarginMs?: number;
+  /**
+   * Watchdog for a stuck/absent `playback_done` ack (ms). Keeps a dead client
+   * from holding the floor forever; also how tests trigger the drain-timeout
+   * path without waiting out the 45 s production default.
+   */
+  playbackDoneTimeoutMs?: number;
   /** Sustained speech before listen-start / barge-in (US17/US20). */
   sustainMs?: number;
   /** Turn-yield classifier while agent holds the floor (not VAD). */
@@ -124,6 +130,7 @@ export class PerceptionSession {
   private readonly bargeInEnabled: boolean;
   private readonly listenArmMs: number;
   private readonly echoMarginMs: number;
+  private readonly playbackDoneTimeoutMs: number;
   private readonly clientOwnsAsr: boolean;
   private thinking = false;
 
@@ -195,6 +202,9 @@ export class PerceptionSession {
     this.listenArmMs = deps.listenArmMs ?? Number(process.env.LISTEN_ARM_MS || 700);
     this.echoMarginMs =
       deps.echoMarginMs ?? Number(process.env.BARGE_ECHO_MARGIN_MS || 300);
+    this.playbackDoneTimeoutMs =
+      deps.playbackDoneTimeoutMs ??
+      Number(process.env.PLAYBACK_DONE_TIMEOUT_MS || PLAYBACK_DONE_TIMEOUT_MS);
     const sustainMs =
       deps.sustainMs ?? Number(process.env.BARGE_IN_SUSTAIN_MS || 180);
     this.listenSustain = new SustainedSpeechGate(sustainMs);
@@ -440,8 +450,10 @@ export class PerceptionSession {
       return;
     }
 
-    // Post-TTS deaf window (UI may show listening; VAD ignored)
-    if (!this.isListenArmed(frame.t_ms)) {
+    // Post-TTS deaf window (UI may show listening; VAD ignored). The
+    // residual-audio term covers the drain-timeout window where the session
+    // moved back to listening but issued chunks are still audible (F1).
+    if (!this.isListenArmed(frame.t_ms) || this.hasResidualEcho(frame.t_ms)) {
       this.listenSustain.reset();
       return;
     }
@@ -516,10 +528,11 @@ export class PerceptionSession {
       this.clearIncompleteHold();
       this.metric("stt_interrupt", t_ms);
       this.bargeIn(t_ms);
-    } else if (!this.isListenArmed(t_ms)) {
-      // Drop trailing TTS bleed that STT finalizes during the post-playback deaf window
+    } else if (!this.isListenArmed(t_ms) || this.hasResidualEcho(t_ms)) {
+      // Drop trailing TTS bleed that STT finalizes during the post-playback
+      // deaf window or while issued audio is still audible (F1).
       console.log(
-        `[perception] ignore text_utterance during listen_arm: ${JSON.stringify(trimmed).slice(0, 80)}`,
+        `[perception] ignore text_utterance during listen_arm/echo window: ${JSON.stringify(trimmed).slice(0, 80)}`,
       );
       return;
     }
@@ -640,6 +653,32 @@ export class PerceptionSession {
   }
 
   /**
+   * Absolute media-clock ms where the live echo suppression ends. Unlike
+   * echoFloorAt (a floor that re-anchors to t_ms), this EXPIRES: once the
+   * issued-audio horizon plus margin has passed, candidates are allowed, so
+   * barge works again "naturally". Zero means no suppression window.
+   */
+  private echoWindowEndAt(): number {
+    const windowEnd =
+      this.audioIssuedEndAt > 0 ? this.audioIssuedEndAt + this.echoMarginMs : 0;
+    return Math.max(this.bargeEchoUntil, windowEnd);
+  }
+
+  /**
+   * True while audio already handed to the client may still be audible even
+   * though playbackOpen is false — e.g. the drain watchdog fired while
+   * scheduled chunks are still playing (F1). Mic energy in this window is
+   * echo, not a barge candidate.
+   */
+  private hasResidualEcho(t_ms: number): boolean {
+    return (
+      !this.playbackOpen &&
+      this.audioIssuedEndAt > 0 &&
+      t_ms < this.audioIssuedEndAt + this.echoMarginMs
+    );
+  }
+
+  /**
    * Soft candidate → hard yield (US20) via TurnYieldAdapter.
    * Soft-pause on voiced candidate; hard yield after sustain + effort; clear if drops.
    * While client TTS is still playing, ignore VAD yield entirely — residual speech
@@ -660,8 +699,12 @@ export class PerceptionSession {
     const action = this.turnYield.feed({
       t_ms: frame.t_ms,
       vad,
-      ttsActive: this.state === "speaking",
-      echoUntil_ms: this.echoFloorAt(frame.t_ms),
+      // Audio may still be scheduled client-side even though playbackOpen
+      // closed (drain watchdog) — keep treating TTS as active so the dynamic
+      // floor suppresses echo-derived candidates (F1/ADR-006). The window is
+      // absolute so it still allows hard_yield once genuinely past.
+      ttsActive: this.state === "speaking" || this.hasResidualEcho(frame.t_ms),
+      echoUntil_ms: this.echoWindowEndAt(),
       agentState:
         this.state === "interrupted"
           ? "interrupted"
@@ -790,12 +833,15 @@ export class PerceptionSession {
         this.playbackDoneWaiter.resolve();
       }
       const timer = setTimeout(() => {
+        // Watchdog only releases the floor — issued audio may still be
+        // scheduled/playing client-side. KEEP audioIssuedEndAt here (a real
+        // client playback_done clears it) so the dynamic echo floor keeps
+        // decaying naturally until the horizon is truly past (F1/ADR-006).
         this.playbackOpen = false;
-        this.audioIssuedEndAt = 0;
         this.logSpeechComplete(this.clientNow(), false);
         this.playbackDoneWaiter = undefined;
         resolve();
-      }, PLAYBACK_DONE_TIMEOUT_MS);
+      }, this.playbackDoneTimeoutMs);
       this.playbackDoneWaiter = { resolve, timer };
     });
   }
