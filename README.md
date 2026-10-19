@@ -103,6 +103,8 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | Spoken-text echo filter on STT | [LEARN — Text echo filter](LEARN.md#text-echo-filter) |
 | Block VAD yield while TTS still playing | [LEARN — Server playback floor](LEARN.md#server-playback-floor) |
 | `playback_done` waits for real playout | [LEARN — Wait for real completion](LEARN.md#wait-for-real-playback-completion) |
+| Dynamic echo floor from issued audio (ADR-006) | [LEARN — Dynamic echo floor](LEARN.md#dynamic-echo-floor-adr-006) |
+| Fade before stop, not a cliff (ADR-006) | [LEARN — Fade, not cliff](LEARN.md#fade-not-cliff-adr-006) |
 | Hard barge must silence remote audio | [LEARN — AEC sink](LEARN.md#engine-agnostic-aec-sink) |
 
 ### Vision & desktop help
@@ -167,7 +169,9 @@ See [`mastra2/.env.example`](./mastra2/.env.example). Important knobs:
 | `OPENAI_*` | LLM endpoint |
 | `PERCEPTION_WS_PORT` | default `4112` |
 | `BARGE_IN_ENABLED` | speaker duplex (AEC + echo filter) |
-| `LISTEN_ARM_MS` | post-TTS deaf window |
+| `LISTEN_ARM_MS` | post-TTS deaf window (fallback when no chunk durations) |
+| `BARGE_ECHO_MARGIN_MS` | echo window past issued audio, default `300` (ADR-006) |
+| `BARGE_FADE_MS` | stop fade, default `150`; client bundle reads `NEXT_PUBLIC_BARGE_FADE_MS` (ADR-006) |
 | `PROGRESS_ENABLED` | talk-while-working narration (default `true`; `false` = silent until answer) |
 | `PROGRESS_ACK_MS` / `PROGRESS_STILL_MS` / `PROGRESS_MAX_STILL` | narration timing (defaults 3000 / 20000 / 6) |
 | `HEARSAY_RESOURCE_ID` | shared memory across chat + presence |
