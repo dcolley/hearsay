@@ -312,6 +312,10 @@ export class PerceptionSession {
     this.turnAbort = new AbortController();
     this.thinking = false;
     this.playbackOpen = false;
+    // Reset discipline: the whole echo-window state goes with the thread,
+    // not just playbackOpen (F4).
+    this.audioIssuedEndAt = 0;
+    this.bargeEchoUntil = 0;
     this.speechCompleteLogged = false;
     this.partialSpoken = "";
     this.interruptHeard = null;

@@ -185,3 +185,27 @@ describe("session: dynamic echo floor survives drain timeout (F1)", () => {
     }
   });
 });
+
+describe("session: clearConversation echo-state reset (F4)", () => {
+  it("drops audioIssuedEndAt and bargeEchoUntil when wiping the conversation", async () => {
+    const { session } = makeLiveSession();
+    try {
+      await speakTurn(session);
+      assert.ok((session as unknown as { audioIssuedEndAt: number }).audioIssuedEndAt > 1700);
+      // Synchronous prefix of clearConversation — before the confirmation
+      // speak re-seeds the fields for the fresh turn.
+      const done = session.clearConversation();
+      const priv = session as unknown as {
+        audioIssuedEndAt: number;
+        bargeEchoUntil: number;
+        playbackOpen: boolean;
+      };
+      assert.equal(priv.audioIssuedEndAt, 0, "stale audio horizon must drop");
+      assert.equal(priv.bargeEchoUntil, 0, "stale echo seed must drop");
+      assert.equal(priv.playbackOpen, false);
+      await done;
+    } finally {
+      session.reset();
+    }
+  });
+});
