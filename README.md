@@ -127,6 +127,7 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | Date / time tools | [LEARN — Date / time](LEARN.md#date--time) |
 | Weather & web search | [LEARN — Weather & web search](LEARN.md#weather--web-search) |
 | Mastra skills + agent instructions | [LEARN — Agent, skills](LEARN.md#agent-skills-and-server-tools) |
+| Tool contracts + deferred announcements (ADR-008) | [LEARN — Tool contracts](LEARN.md#tool-contracts-and-announce-queue-adr-008) |
 
 ### TTS engines
 
@@ -182,6 +183,9 @@ See [`mastra2/.env.example`](./mastra2/.env.example). Important knobs:
 | `SPECULATE_ADVANCE_MS` | likely-EOU advance window before commit, default `200` (ADR-007) |
 | `PROGRESS_ENABLED` | talk-while-working narration (default `true`; `false` = silent until answer) |
 | `PROGRESS_ACK_MS` / `PROGRESS_STILL_MS` / `PROGRESS_MAX_STILL` | narration timing (defaults 3000 / 20000 / 6) |
+| `TOOL_TIMEOUT_MS` | per-tool contract deadline, default `15000` (ADR-008) |
+| `ANNOUNCE_SILENCE_MS` | silent streak required before announcing an async result, default `1200` (ADR-008) |
+| `ANNOUNCE_TTL_MS` | age past which an unannounced result is dropped, default `120000` (ADR-008) |
 | `HEARSAY_RESOURCE_ID` | shared memory across chat + presence |
 | `HEARSAY_TIMEZONE` | default for date/time tools |
 | `TAVILY_API_KEY` | web search |

@@ -136,6 +136,37 @@ write gate lands as step 1 before any speculation can run.
 - Tests: [`speculation.test.ts`](mastra2/src/mastra/perception/speculation.test.ts), [`session.speculation.test.ts`](mastra2/src/mastra/perception/session.speculation.test.ts), [`memory-write-gate.test.ts`](mastra2/src/mastra/memory/memory-write-gate.test.ts)
 - Decision: [ADR-007](docs/adr-007-speculative-generation.md)
 
+### Tool contracts and announce queue (ADR-008)
+
+Two timing decisions the rest of the stack had not made. Server tools now run
+under a shared contract (`withToolContract`): a 15 s wall deadline (env
+`TOOL_TIMEOUT_MS`, per-tool `timeoutMs`), cancellation bound to the session's
+turn abort (`agent.stream({abortSignal})` reaches every tool execute as
+`context.abortSignal`, verified against the installed `@mastra/core`; the
+requestContext copy is the fallback), and a breach delivered to the model as
+a typed `{error: "timeout" | "cancelled", tool}` so it apologizes instead of
+the turn dying. `ask_user` / `offer_choices` opt out (`kind: "hitl"`):
+waiting out a thinking user is the feature, and the bridge no longer attaches
+any timer to their calls. The other half is the announce queue: an async tool
+(`kind: "async"`) answers `{accepted: true, jobId}` and stays silent; the
+completion lands in `AnnounceQueue` and speaks only when a silent streak of
+1.2 s holds, we are not speaking, and no HITL prompt waits, dropping results
+older than 120 s and evicting past 3 queued. Results therefore survive
+interruption: a barge that catches the announce itself re-queues, deduped by
+id, and the result lands again at the next quiet moment. The drain speaks
+through the same FIFO as everything else (`tts_flush` after it drains), fed
+by VAD silence ticks plus a small poll injected via `SessionDeps`.
+Narration speaks the moment work starts (ADR-003); announcements speak the
+moment the room is quiet.
+
+- Contract helper: [`with-contract.ts`](mastra2/src/mastra/tools/with-contract.ts) `withToolContract` / `runWithToolContract` (deadline, abort race, `async` envelope)
+- Queue: [`announce-queue.ts`](mastra2/src/mastra/perception/announce-queue.ts) `AnnounceQueue` (push / maybeDrain on an injected clock, requeue dedupe)
+- Wiring: `tryDrainAnnouncements` / `requeueAnnouncements` and the `requestContext` keys `turnAbortSignal` / `announceQueue` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- Bridge: per-call `timeoutMs` and no-timer HITL in [`client-bridge.ts`](mastra2/src/mastra/perception/client-bridge.ts)
+- Env: `TOOL_TIMEOUT_MS` (default 15000), `ANNOUNCE_SILENCE_MS` (1200), `ANNOUNCE_TTL_MS` (120000)
+- Tests: [`with-contract.test.ts`](mastra2/src/mastra/tools/with-contract.test.ts), [`announce-queue.test.ts`](mastra2/src/mastra/perception/announce-queue.test.ts) (fake clock), [`session.announce.test.ts`](mastra2/src/mastra/perception/session.announce.test.ts) (interrupted stream, exact-once announce, re-queue on barge)
+- Decision: [ADR-008](docs/adr-008-tool-contracts-and-announce-queue.md)
+
 ### Streaming spoken replies
 
 Agent text is flushed to TTS in sentence-sized chunks so first audio starts before the full answer exists. Client drains a queue and sends `playback_done` when truly finished.
