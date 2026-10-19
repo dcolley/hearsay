@@ -19,6 +19,14 @@ export interface MemoryWriteGate {
   blockWrites(on: boolean): void;
   readonly writesBlocked: boolean;
   flushPending(): Promise<void>;
+  /**
+   * Flush + open as one ordered step: keep the gate CLOSED while draining
+   * (looping until the buffer is empty), then unblock, so a write racing a
+   * commit is drained into THIS flush instead of landing late or dropped.
+   */
+  flushAndUnblock?(): Promise<void>;
+  /** Resolve once the storage-domain wrapper is installed. */
+  ensureWriteGate?(): Promise<void>;
   clearPending(): void;
 }
 
@@ -84,6 +92,25 @@ export class HearsayMemory extends Memory implements MemoryWriteGate {
     } finally {
       this.flushing = false;
     }
+  }
+
+  /**
+   * Atomic flush + unblock (ADR-007 minor-2): stays blocked while draining
+   * and re-checks the buffer until it is empty, so a stream write racing the
+   * commit either lands in this flush (in order) or arrives after the gate
+   * opened normally - never in a dropped in-between window.
+   */
+  async flushAndUnblock(): Promise<void> {
+    await this.ensureWriteGate();
+    // ensureWriteGate is an await point: a write may already be buffered.
+    // Loop-drain BEFORE opening so racing writes (which buffer while blocked)
+    // are pulled into this commit; only then unblock, with no await after the
+    // final empty check.
+    for (;;) {
+      if (this.pendingWrites.length === 0) break;
+      await this.flushPending();
+    }
+    this.writeBlockedFlag = false;
   }
 
   /** Install the storage-domain wrapper. Safe to call repeatedly. */

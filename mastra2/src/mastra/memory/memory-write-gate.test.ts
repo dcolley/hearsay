@@ -164,6 +164,50 @@ describe("HearsayMemory write gate (ADR-007)", () => {
     assert.deepEqual(all.slice(2), ["speculative turn", "Hello there. All good."]);
   });
 
+  it("flushAndUnblock: a write racing the flush lands in-order at this commit", async () => {
+    const memory = newMemory();
+    const threadId = randomUUID();
+    await memory.createThread({ threadId, resourceId: "hearsay-test", title: "t" });
+
+    memory.blockWrites(true);
+    await memory.saveMessages({ messages: [msg("user", "one", threadId), msg("assistant", "two", threadId)] as never });
+
+    // The flush is in flight when a stream write races the commit (the old
+    // flush->unblock gap left this write either late or dropped).
+    const flush = memory.flushAndUnblock();
+    await memory.saveMessages({ messages: [msg("user", "racer", threadId)] as never });
+    await flush;
+
+    assert.deepEqual(await texts(memory, threadId), ["one", "two", "racer"]);
+    assert.equal(memory.writesBlocked, false, "the gate is fully open afterwards");
+
+    // writes land normally again immediately - same turn, nothing dropped
+    await memory.saveMessages({ messages: [msg("user", "four", threadId)] as never });
+    assert.deepEqual(await texts(memory, threadId), ["one", "two", "racer", "four"]);
+  });
+
+  it("awaiting ensureWriteGate before the first stream keeps the domain route gated", async () => {
+    // Minor-1: blockWrites(true) installs the storage-domain wrapper in the
+    // background; a stream started without awaiting it could escape the gate.
+    const store = new LibSQLStore({ id: "hearsay-gate-test", url: ":memory:" });
+    const memory = new HearsayMemory({
+      storage: store,
+      options: { lastMessages: 24, observationalMemory: false, workingMemory: { enabled: false } },
+    });
+    const threadId = randomUUID();
+    await memory.createThread({ threadId, resourceId: "hearsay-test", title: "t" });
+
+    memory.blockWrites(true);
+    await memory.ensureWriteGate();
+
+    const domain = (await store.getStore("memory")) as unknown as {
+      saveMessages: (args: { messages: unknown }) => Promise<unknown>;
+    };
+    assert.ok(domain.saveMessages, "storage domain exposes saveMessages (the stream shortcut)");
+    await domain.saveMessages({ messages: [msg("user", "escaped write", threadId)] });
+    assert.deepEqual(await texts(memory, threadId), [], "the install must complete before the first stream write");
+  });
+
   it("unblocked behaviour is bit-identical to the narration guard (ADR-003)", async () => {
     const memory = newMemory();
     const threadId = randomUUID();
