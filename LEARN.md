@@ -232,6 +232,23 @@ While `playbackOpen` (first TTS → client `playback_done`), **ignore VAD soft_p
 
 - Completion + barge abort: [`webrtc-aec-playback.ts`](web/src/lib/perception/webrtc-aec-playback.ts), [`playback.ts`](web/src/lib/perception/playback.ts)
 
+### Dynamic echo floor (ADR-006)
+
+A fixed `LISTEN_ARM_MS` echo floor guesses from speak-start. Instead every TTS chunk with a derivable duration (int16 PCM; 32 bytes per ms at 16 kHz) extends `audioIssuedEndAt`, and the cascade floor at frame time is `max(0, audioIssuedEndAt - t_ms) + BARGE_ECHO_MARGIN_MS` (default 300). When playback truly ends the derived value resets, so the window decays to the margin alone. `LISTEN_ARM_MS` remains the fallback for text-only or mock TTS.
+
+- Floor math + resets: `echoFloorAt` / `audioIssuedEndAt` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- Chunk duration derivation: [`tts.ts`](mastra2/src/mastra/perception/tts.ts) `ttsChunkDurationMs`
+- Tests: [`barge.test.ts`](mastra2/src/mastra/perception/barge.test.ts) (fake chunk clock, exact tail math)
+- Decision: [ADR-006](docs/adr-006-barge-echo-and-fade.md)
+
+### Fade, not cliff (ADR-006)
+
+On stop (barge or teardown) the loopback send gain ramps to zero over `BARGE_FADE_MS` (default 150) with `linearRampToValueAtTime`, and the remote element volume step-ramps, before the existing hard cut lands. Pure mapping lives in `fade.ts` so the personality is testable without a DOM; the wire protocol and server `tts.stop()` semantics stay untouched.
+
+- Policy (numbers in, numbers out): [`fade.ts`](web/src/lib/perception/fade.ts), [`fade.test.ts`](web/src/lib/perception/fade.test.ts)
+- Web Audio ramp: [`webrtc-aec-playback.ts`](web/src/lib/perception/webrtc-aec-playback.ts) `stopWithFade`
+- Consumed by: [`playback.ts`](web/src/lib/perception/playback.ts) `stop(reason)`
+
 ---
 
 ## Vision

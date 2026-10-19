@@ -31,6 +31,10 @@ export class WebrtcAecPlayback {
   private ready: Promise<void> | null = null;
   private generation = 0;
   private playing = false;
+  /** Deferred hard-stop of a fade-in-progress (must never outlive the fade). */
+  private fadeStopTimer: number | null = null;
+  /** Remote-element volume step-ramp during a fade (tracked so stop() can kill it). */
+  private fadeStepTimer: number | null = null;
 
   async ensureReady(): Promise<void> {
     if (this.peers && this.ctx && this.dest) return;
@@ -65,6 +69,9 @@ export class WebrtcAecPlayback {
     const gain = this.gain!;
     const gen = this.generation;
 
+    // A clip started while a fade is in flight must not be killed by the
+    // pending stop/fade-ramp timers (F2).
+    this.clearFadeTimers();
     this.stopCurrentSource();
     this.unduckOutput();
 
@@ -152,10 +159,72 @@ export class WebrtcAecPlayback {
   }
 
   /**
+   * Silence over fadeMs, then hard stop (ADR-006). The send gain AudioParam
+   * ramps linearly, the remote element volume step-ramps (HTMLAudioElement
+   * volume is not schedulable), and the full cut lands after fadeMs.
+   */
+  stopWithFade(fadeMs: number): void {
+    this.clearFadeTimers();
+    if (fadeMs <= 0 || !this.ctx || !this.gain || !this.currentSource) {
+      this.stop();
+      return;
+    }
+    const ctx = this.ctx;
+    const param = this.gain.gain;
+    try {
+      const now = ctx.currentTime;
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(0, now + fadeMs / 1000);
+    } catch {
+      this.stop();
+      return;
+    }
+    if (this.remoteAudio) {
+      const el = this.remoteAudio;
+      const start = el.muted ? 0 : el.volume;
+      const steps = Math.max(1, Math.round(fadeMs / 25));
+      let i = 0;
+      this.fadeStepTimer = window.setInterval(() => {
+        i++;
+        if (i >= steps) {
+          if (this.fadeStepTimer != null) window.clearInterval(this.fadeStepTimer);
+          this.fadeStepTimer = null;
+          el.volume = 0;
+          return;
+        }
+        el.volume = Math.max(0, start * (1 - i / steps));
+      }, 25);
+    }
+    this.fadeStopTimer = window.setTimeout(() => {
+      this.fadeStopTimer = null;
+      this.stop();
+    }, fadeMs);
+  }
+
+  /**
+   * Cancel any fade timers still armed. Both were untracked before F2: a
+   * stale stop timer killed clips started during the fade, and the volume
+   * step-ramp survived stop()/close() and re-voiced a muted element.
+   */
+  private clearFadeTimers(): void {
+    if (typeof window === "undefined") return;
+    if (this.fadeStopTimer != null) {
+      window.clearTimeout(this.fadeStopTimer);
+      this.fadeStopTimer = null;
+    }
+    if (this.fadeStepTimer != null) {
+      window.clearInterval(this.fadeStepTimer);
+      this.fadeStepTimer = null;
+    }
+  }
+
+  /**
    * Hard barge — silence speakers now. Must mute remote HTMLAudioElement;
    * stopping the local source alone leaves WebRTC-buffered audio audible.
    */
   stop(): void {
+    this.clearFadeTimers();
     this.generation += 1;
     this.playing = false;
     this.stopCurrentSource();
@@ -191,7 +260,16 @@ export class WebrtcAecPlayback {
   }
 
   private unduckOutput(): void {
-    if (this.gain) this.gain.gain.value = 1;
+    if (this.gain) {
+      // Drop any leftover fade ramp before setting the clip's gain, or a
+      // scheduled ramp-to-zero silently zeroes the new clip (F2).
+      try {
+        this.gain.gain.cancelScheduledValues(this.ctx?.currentTime ?? 0);
+      } catch {
+        // context closing — value assignment still stands
+      }
+      this.gain.gain.value = 1;
+    }
     if (this.remoteAudio) {
       this.remoteAudio.muted = false;
       this.remoteAudio.volume = 1;

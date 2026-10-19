@@ -1,4 +1,5 @@
 import { synthesizeKokoroUrl } from "./kokoro-tts";
+import { fadeMsFor, type PlaybackStopReason } from "./fade";
 import {
   stopPocketGenerate,
   synthesizePocketUrl,
@@ -11,7 +12,8 @@ import {
 import { WebrtcAecPlayback } from "./webrtc-aec-playback";
 
 /**
- * TTS playback with hard-stop for barge-in.
+ * TTS playback with a faded stop for barge-in (ADR-006: short gain ramp, not
+ * a cliff).
  * Audio and text both use a queue — never cancel on enqueue.
  * `playback_done` fires only after an explicit flush (end of assistant turn).
  *
@@ -130,8 +132,13 @@ export class TtsPlayback {
     if (!this.drainingText) void this.drainText(this.generation);
   }
 
-  /** Hard cut — silence immediately, no fade. */
-  stop(): void {
+  /**
+   * Cut playback. Queues and engines stop accepting audio immediately; what
+   * is already playing through the AEC sink gets a short gain fade before the
+   * hard stop (ADR-006). speechSynthesis exposes no gain control and stays a
+   * hard cut; the server-side tts.stop() adapter semantics are unchanged.
+   */
+  stop(reason: PlaybackStopReason = "barge_in"): void {
     this.generation += 1;
     this.audioQueue = [];
     this.textQueue = [];
@@ -140,7 +147,7 @@ export class TtsPlayback {
     this.flushRequested = false;
     this.cancelSpokenClear();
     this.spokenText = "";
-    this.aec.stop();
+    this.aec.stopWithFade(fadeMsFor(reason));
     this.stopDirectAudio();
     void stopPocketGenerate();
     if (typeof window !== "undefined") {
@@ -162,7 +169,8 @@ export class TtsPlayback {
 
   /** Tear down WebRTC AEC peers (call when Presence session ends). */
   dispose(): void {
-    this.stop();
+    // Teardown while audible gets the same courtesy fade as barge (ADR-006).
+    this.stop("session_end");
     this.aec.close();
   }
 

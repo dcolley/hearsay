@@ -1,3 +1,5 @@
+import { PCM_SAMPLE_RATE } from "./types.ts";
+
 export interface TtsChunk {
   /** Raw audio bytes when available */
   audio?: Buffer;
@@ -91,6 +93,38 @@ export class BrowserTtsAdapter implements TtsAdapter {
   stop(): void {
     this.aborted = true;
   }
+}
+
+/**
+ * Playable duration (ms) this chunk adds when issued to the client, or null
+ * when it cannot be derived. int16 PCM (mime audio/L16 with optional
+ * rate=..., channels=..., or audio/pcm) and size-derived WAV are derivable;
+ * MP3/Opus and text-only chunks are not, so callers fall back to the static
+ * listen-arm.
+ */
+export function ttsChunkDurationMs(chunk: TtsChunk): number | null {
+  const { audio, mime } = chunk;
+  if (!audio || audio.byteLength === 0) return null;
+  const m = (mime ?? "").toLowerCase();
+  const rateMatch = /rate=(\d+)/.exec(m);
+  const rate = rateMatch ? Number(rateMatch[1]) : PCM_SAMPLE_RATE;
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  const chMatch = /channels=(\d+)/.exec(m);
+  const channels =
+    chMatch && Number.isFinite(Number(chMatch[1])) && Number(chMatch[1]) > 0
+      ? Number(chMatch[1])
+      : 1;
+  // Bytes consumed per millisecond across all channels.
+  const bytesPerMs = 2 * channels * (rate / 1000);
+  if (bytesPerMs <= 0) return null;
+  if (m.includes("l16") || m.includes("pcm")) {
+    return Math.floor(audio.byteLength / bytesPerMs);
+  }
+  if (m.includes("wav") && audio.byteLength > 44) {
+    // RIFF container: assume the data chunk fills the rest (16-bit).
+    return Math.floor((audio.byteLength - 44) / bytesPerMs);
+  }
+  return null;
 }
 
 export function createTtsAdapter(): TtsAdapter {
