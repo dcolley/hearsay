@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted (the post-review fix round of 2026-10-19 is folded in below; the
+invariant - speculative runs never write memory and never have tool effects -
+is unchanged)
 
 ## Date
 
@@ -11,6 +13,7 @@ Accepted
 ## Related files
 
 - `mastra2/src/mastra/perception/speculation.ts` - the speculation state machine
+- `mastra2/src/mastra/perception/server-tool-intent.ts` - server-tool exclusion matcher (weather / web-search phrasing)
 - `mastra2/src/mastra/perception/turn.ts` - likely-EOU callback on `AdaptiveSilenceTurnDetector`
 - `mastra2/src/mastra/perception/session.ts` - wiring: `onLikelyEou`, `finalizeSpeculative`, `commitSpeculative`, `discardSpeculation`, `emitOrHold`, memory-gate helpers
 - `mastra2/src/mastra/memory/hearsay-memory.ts` - the memory write gate (storage domain + `saveMessages`)
@@ -102,3 +105,67 @@ entirely. So a gate that only wraps `saveMessages` leaks.
 - All speculation timers are owned by `SpeculativeTurn` and cleared on every
   terminal transition; the state-machine tests assert handle symmetry, and the
   integration suite runs on real timers without leaks.
+
+## Fix round (2026-10-19, post-review)
+
+### 1. Attempt-ended handoff: a confirmed turn is never lost
+
+The original commit path guarded `if (this.spec !== spec) return;` - but
+`discardSpeculation` nulls `this.spec`, so when the attempt ended *during*
+`await spec.finalized` (needs-effects / server-tool / empty / asr-error
+discard, or budget expiry) the confirmed turn was dropped: STALLED, listening,
+nothing spoken or persisted. The rule now is a single handoff - when a
+speculation attempt ends, exactly one of two things happens:
+
+1. the attempt committed (promote, `commitSpeculative`, done), or
+2. the turn falls through to the ordinary commit path (`commitTurnNormal`)
+   exactly once.
+
+The guard branch and the fallthrough are mutually exclusive by construction:
+the promote branch returns, and the discard branch is only reached when the
+attempt is still ours, so neither can double-commit and neither can stall.
+Regression: `session.speculation.test.ts` fires each discard reason during a
+commit-await (delayed ASR finalize) and asserts the ordinary commit speaks and
+persists exactly one user + assistant pair.
+
+### 2. Server-tool exclusions and a conservative promotion rule
+
+Exclusions were client-tool regexes only (`describe-frame.ts`), so for a
+provider that honors `toolChoice: "none"` a weather or web-search question
+could promote on a tools-off stream and be answered from model memory with
+the tool never executed - a fabricated answer. Two changes:
+
+- **(a) Server-tool gate** [`server-tool-intent.ts`]: `finalizeSpeculative`
+  now also discards with reason `server-tool` when the transcript matches
+  weather or web-search phrasing (rule set: domain nouns - weather, forecast,
+  temperature, degrees, umbrella, humidity, wind speed, news, headlines - and
+  verb-frames "will it rain", "is it going to snow", "look ... up", "search
+  ... web", "google|googled|googling", "check online", "what's happening".
+  Bare condition words without a tool frame ("a haiku about rain") do NOT
+  match.) Matched utterances never start a speculative stream; the ordinary
+  path (tools available) commits them. Client-tool exclusions
+  (needsScreenshot / needsLiveVision / wantsOfferChoices) are kept.
+- **(b) Promotion is conservative**: the same stream is continued ONLY when
+  the run provably could not have needed tools - after (a) that is exactly
+  the set that passes all four exclusion checks (and a stream that emitted a
+  tool-call chunk discarded itself). The accepted tool-call-chunk discard
+  (`session.ts`, tool-intent) stays as the belt for providers that ignore
+  `toolChoice: "none"`.
+
+### 3. Minors
+
+- **Write-gate install before the first stream**: `blockWrites(true)` installs
+  the storage-domain wrapper fire-and-forget; `finalizeSpeculative` now awaits
+  `ensureWriteGate()` before starting the stream, so file/remote storage
+  latency cannot widen the first-persist race.
+- **Atomic flush + unblock**: `flushPending()` followed by `blockWrites(false)`
+  left a window where a stream write racing the commit was buffered *after*
+  the flush and landed late or never. `flushAndUnblock()` keeps the gate
+  closed while loop-draining until the buffer is empty, then unblocks with no
+  await after the final empty check - so a write racing this commit lands
+  in-order at this commit.
+- **One retry per utterance, deliberately**: `AdaptiveSilenceTurnDetector.reset()`
+  now clears `likelyEouFired`, so the next utterance is guaranteed its
+  attempt back through reset() alone (not only via the speech-rearm path).
+  Rule stated: one speculation attempt per utterance; an attempt that ends
+  early is cheap, because fix 1 hands the turn to the ordinary commit anyway.

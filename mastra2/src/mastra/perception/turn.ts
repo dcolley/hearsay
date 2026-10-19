@@ -171,6 +171,11 @@ export class AdaptiveSilenceTurnDetector implements TurnAdapter {
     this.speechStartedAt = null;
     this.lastSpeechAt = null;
     this.committed = false;
+    // ADR-007 fix round (minor-3): fully re-arm the speculation hook. One
+    // likely-EOU attempt per utterance, and reset() ends the attempt (commit
+    // or discard) - the next utterance must get its attempt back without
+    // depending on the speech-rearm path alone.
+    this.likelyEouFired = false;
   }
 }
 

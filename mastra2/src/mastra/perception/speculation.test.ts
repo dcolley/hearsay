@@ -220,4 +220,25 @@ describe("AdaptiveSilenceTurnDetector likely-EOU hook (ADR-007)", () => {
     assert.equal(fired, 0);
     assert.equal(commits[0], 2600, "normal commit still works");
   });
+
+  it("detector reset re-arms the hook for the next attempt (ADR-007 fix round)", () => {
+    // The retry rule: one speculation attempt per utterance; when an attempt
+    // ends (commit or discard, which routes through reset()) the detector
+    // must be fully re-armed so the NEXT utterance gets its attempt back.
+    const det = new AdaptiveSilenceTurnDetector({ speculativeAdvanceMs: 200 });
+    const fired: number[] = [];
+    det.setLikelyEouCallback((t) => fired.push(t));
+    frames(det, true, 20, 110);
+    frames(det, false, 2220, 20); // fires, then commits
+    assert.equal(fired.length, 1);
+    det.reset();
+    // utterance two, same timings
+    frames(det, true, 5000, 110);
+    const commits2 = frames(det, false, 7200, 20);
+    assert.equal(fired.length, 2, "reset must re-arm the likely-EOU hook");
+    assert.equal(commits2[0], 7580);
+    // trailing silence never re-fires mid-utterance
+    frames(det, false, 7580, 10);
+    assert.equal(fired.length, 2);
+  });
 });
