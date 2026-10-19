@@ -9,7 +9,7 @@
     "perception": "tsx src/mastra/perception/main.ts",
     "models": "bash src/mastra/perception/scripts/fetch-smart-turn.sh",
     "dev:all": "concurrently -k -n studio,perception -c blue,magenta \"yarn dev\" \"yarn perception\"",
-    "test": "tsx --test src/mastra/perception/**/*.test.ts",
+    "test": "tsx --test src/mastra/**/*.test.ts",
     "build": "mastra build",
     "start": "mastra start"
   },

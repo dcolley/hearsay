@@ -39,6 +39,7 @@ const threadId = randomUUID();
 describe("HearsayMemory narration guard", () => {
   it("strips narration echoes from assistant text on write", async () => {
     const memory = newMemory();
+    await memory.createThread({ threadId, resourceId: "hearsay-test", title: "t" });
     const echo = msg(
       "assistant",
       "Let me check. It is 18 degrees and sunny.",
@@ -65,6 +66,7 @@ describe("HearsayMemory narration guard", () => {
   it("leaves clean messages and user text untouched", async () => {
     const memory = newMemory();
     const thread = randomUUID();
+    await memory.createThread({ threadId: thread, resourceId: "hearsay-test", title: "t" });
     await memory.saveMessages({
       messages: [
         msg("user", "Searching the web for me, please.", thread),
