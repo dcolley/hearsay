@@ -36,7 +36,7 @@ import {
   createTurnYieldAdapter,
   type TurnYieldAdapter,
 } from "./turn-yield.ts";
-import type { TtsAdapter } from "./tts.ts";
+import { ttsChunkDurationMs, type TtsAdapter } from "./tts.ts";
 import {
   emptyScene,
   type AgentState,
@@ -67,8 +67,11 @@ export type SessionDeps = {
   resourceId?: string;
   /** Resume this Mastra thread when valid; otherwise mint a new id. */
   threadId?: string;
-  /** Post-TTS deaf window before VAD can open a turn (US30). */
+  /** Post-TTS deaf window before VAD can open a turn (US30). Fallback echo floor
+   *  when audio chunk durations are unavailable (mock/text-only TTS). */
   listenArmMs?: number;
+  /** Extra ms past the last issued audio chunk before barge is allowed (ADR-006). */
+  echoMarginMs?: number;
   /** Sustained speech before listen-start / barge-in (US17/US20). */
   sustainMs?: number;
   /** Turn-yield classifier while agent holds the floor (not VAD). */
@@ -120,6 +123,7 @@ export class PerceptionSession {
   private readonly halfDuplex: boolean;
   private readonly bargeInEnabled: boolean;
   private readonly listenArmMs: number;
+  private readonly echoMarginMs: number;
   private readonly clientOwnsAsr: boolean;
   private thinking = false;
 
@@ -145,6 +149,12 @@ export class PerceptionSession {
   private readonly turnYield: TurnYieldAdapter;
   /** Echo floor: ignore yield candidates until this client t_ms. */
   private bargeEchoUntil = 0;
+  /**
+   * Media-clock ms when the last issued TTS chunk finishes playing, derived
+   * from actual chunk durations (ADR-006). 0 = no chunk data this turn.
+   * Reset when playback truly ends (drain, barge, session reset).
+   */
+  private audioIssuedEndAt = 0;
   /** Soft barge candidate active (US20 pause before hard stop). */
   private softBargePaused = false;
   /** Latest client media clock (performance.now from browser frames). */
@@ -183,6 +193,8 @@ export class PerceptionSession {
     this.bargeInEnabled = deps.bargeInEnabled ?? false;
     this.clientOwnsAsr = deps.clientOwnsAsr ?? false;
     this.listenArmMs = deps.listenArmMs ?? Number(process.env.LISTEN_ARM_MS || 700);
+    this.echoMarginMs =
+      deps.echoMarginMs ?? Number(process.env.BARGE_ECHO_MARGIN_MS || 300);
     const sustainMs =
       deps.sustainMs ?? Number(process.env.BARGE_IN_SUSTAIN_MS || 180);
     this.listenSustain = new SustainedSpeechGate(sustainMs);
@@ -566,6 +578,8 @@ export class PerceptionSession {
   /** Client finished draining TTS queue — re-arm listen after LISTEN_ARM_MS. */
   onPlaybackDone(t_ms: number): void {
     this.playbackOpen = false;
+    // Playback truly ended: residual is gone, the floor decays to margin only.
+    this.audioIssuedEndAt = 0;
     this.logSpeechComplete(this.clientNow(t_ms), false);
     if (this.playbackDoneWaiter) {
       clearTimeout(this.playbackDoneWaiter.timer);
@@ -612,6 +626,20 @@ export class PerceptionSession {
   }
 
   /**
+   * Echo floor for cascade ctx (ADR-006): what the client still has scheduled
+   * at t_ms, max(0, audioIssuedEndAt - t_ms), plus echoMarginMs for room
+   * radiation. With no chunk durations this turn (mock/text-only TTS), falls
+   * back to the static listen-arm seed.
+   */
+  echoFloorAt(t_ms: number): number {
+    if (this.audioIssuedEndAt > 0) {
+      const residual = Math.max(0, this.audioIssuedEndAt - t_ms);
+      return t_ms + residual + this.echoMarginMs;
+    }
+    return this.bargeEchoUntil;
+  }
+
+  /**
    * Soft candidate → hard yield (US20) via TurnYieldAdapter.
    * Soft-pause on voiced candidate; hard yield after sustain + effort; clear if drops.
    * While client TTS is still playing, ignore VAD yield entirely — residual speech
@@ -633,7 +661,7 @@ export class PerceptionSession {
       t_ms: frame.t_ms,
       vad,
       ttsActive: this.state === "speaking",
-      echoUntil_ms: this.bargeEchoUntil,
+      echoUntil_ms: this.echoFloorAt(frame.t_ms),
       agentState:
         this.state === "interrupted"
           ? "interrupted"
@@ -699,6 +727,7 @@ export class PerceptionSession {
       this.logSpeechComplete(t_ms, true);
     }
     this.playbackOpen = false;
+    this.audioIssuedEndAt = 0;
     this.softBargePaused = false;
     this.softBargeAt = null;
     this.deps.tts.stop();
@@ -762,6 +791,7 @@ export class PerceptionSession {
       }
       const timer = setTimeout(() => {
         this.playbackOpen = false;
+        this.audioIssuedEndAt = 0;
         this.logSpeechComplete(this.clientNow(), false);
         this.playbackDoneWaiter = undefined;
         resolve();
@@ -1268,7 +1298,9 @@ export class PerceptionSession {
       this.speechCompleteLogged = false;
     }
     this.playbackOpen = true;
-    // Echo floor in client media clock (same base as PCM frame.t_ms)
+    // Static echo-floor fallback in client media clock (same base as frame
+    // t_ms). Used only when no chunk durations are available (ADR-006); the
+    // live floor is audioIssuedEndAt + margin, updated per issued chunk.
     const now = this.clientNow();
     this.bargeEchoUntil = now + this.listenArmMs;
     this.turnYield.reset();
@@ -1288,6 +1320,13 @@ export class PerceptionSession {
           text: chunk.text,
           mime: chunk.mime,
         });
+        // Dynamic echo floor: extend past the audio we just handed the client
+        // (ADR-006). No derivable duration (text/MP3) leaves the static seed.
+        const durationMs = ttsChunkDurationMs(chunk);
+        if (durationMs != null) {
+          this.audioIssuedEndAt =
+            Math.max(this.audioIssuedEndAt, this.clientNow()) + durationMs;
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1311,6 +1350,7 @@ export class PerceptionSession {
       this.playbackDoneWaiter = undefined;
     }
     this.playbackOpen = false;
+    this.audioIssuedEndAt = 0;
     this.speechCompleteLogged = false;
     this.interruptHeard = null;
     this.pcmChunks = [];
