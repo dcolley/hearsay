@@ -85,6 +85,7 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | Soft-pause then hard yield | [LEARN — turn-yield](LEARN.md#vad-is-not-barge-in-turn-yield) |
 | End of utterance (browser STT vs Whisper) | [LEARN — End of utterance](LEARN.md#end-of-utterance-listen-path) |
 | Incomplete-final hold (heuristic EOU) | [LEARN — Incomplete-final hold](LEARN.md#incomplete-final-hold) |
+| ML end-of-turn gate, Smart Turn v3 (ADR-005) | [LEARN — Semantic turn gate](LEARN.md#semantic-turn-gate-adr-005) |
 | Streaming TTS by sentence | [LEARN — Streaming spoken replies](LEARN.md#streaming-spoken-replies) |
 | Progress speech while tools run (ADR-003) | [LEARN — Progress speech](LEARN.md#progress-speech-talks-while-it-works) |
 | Speakable guard: CJK drift never spoken (ADR-004) | [LEARN — Speakable guard](LEARN.md#speakable-guard-adr-004) |
@@ -140,7 +141,7 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 |-------|----------------------|
 | Single-port Studio + perception | Ops simplicity — [notes](LEARN.md#what-we-consciously-did-not-build) |
 | Software AEC3 / residual metrics | Harder than loopback AEC |
-| Prosody / LM / semantic endpointing | Better EOU than heuristic incomplete-hold |
+| LM / prosody scoring on partial transcripts | Beyond the waveform gate (ADR-005) |
 | Speculative reply before EOU | Lower utterance→reply latency (memory pitfalls) |
 | Continuous screen share | Observe without re-picking a window |
 | Click/type desktop control | Screenshot is observe-only today |
@@ -168,6 +169,10 @@ See [`mastra2/.env.example`](./mastra2/.env.example). Important knobs:
 | `PERCEPTION_WS_PORT` | default `4112` |
 | `BARGE_IN_ENABLED` | speaker duplex (AEC + echo filter) |
 | `LISTEN_ARM_MS` | post-TTS deaf window |
+| `TURN_GATE` | `off` (default) or `smartturn`; ML commit gate (ADR-005) |
+| `SMART_TURN_MODEL_PATH` | model override; `yarn models` fetches the default to `~/.cache/hearsay/` (ADR-005) |
+| `SMART_TURN_THRESHOLD` | classifier threshold, default `0.5` (ADR-005) |
+| `TURN_GATE_GRACE_MS` | extend after an "unfinished" verdict, default `600` (ADR-005) |
 | `PROGRESS_ENABLED` | talk-while-working narration (default `true`; `false` = silent until answer) |
 | `PROGRESS_ACK_MS` / `PROGRESS_STILL_MS` / `PROGRESS_MAX_STILL` | narration timing (defaults 3000 / 20000 / 6) |
 | `HEARSAY_RESOURCE_ID` | shared memory across chat + presence |

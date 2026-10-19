@@ -96,6 +96,17 @@ Browser STT sometimes finalizes mid-thought (“What’s the weather in”). Bef
 - Heuristic: [`mastra2/src/mastra/perception/incomplete-utterance.ts`](mastra2/src/mastra/perception/incomplete-utterance.ts)
 - Wired in `onTextUtterance` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
 
+### Semantic turn gate (ADR-005)
+
+The adaptive silence detector commits on timing, not sentence shape. With `TURN_GATE=smartturn`, before a commit the last 8 s of utterance PCM is scored by pipecat's Smart Turn v3 (8.7 MB Whisper-Tiny classifier, ONNX, local CPU): agree commits; an "unfinished" verdict extends the window once by `TURN_GATE_GRACE_MS` (default 600) and commits anyway after that. Resumed speech cancels the pending verdict. Default `off` is bit-identical to the heuristic-only path. (The old `TURN_MODE=semantic` alias overclaimed and is gone.)
+
+- Gate state machine: [`turn.ts`](mastra2/src/mastra/perception/turn.ts) `GatedTurnDetector`
+- Model wrapper: [`smart-turn.ts`](mastra2/src/mastra/perception/smart-turn.ts) (onnxruntime-node, serialized like `silero-vad.ts`)
+- Log-mel feature port, golden-exact vs HF: [`whisper-mel.ts`](mastra2/src/mastra/perception/whisper-mel.ts)
+- Utterance window ring buffer: `setWindowProvider` / `getUtteranceWindow` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- Weights: `yarn models` (explicit, no postinstall hook); missing model = one warning + `turn_gate=fallback`, behaviour = `off`
+- Decision: [ADR-005](docs/adr-005-smartturn-commit-gate.md)
+
 ### Streaming spoken replies
 
 Agent text is flushed to TTS in sentence-sized chunks so first audio starts before the full answer exists. Client drains a queue and sends `playback_done` when truly finished.
@@ -350,7 +361,7 @@ These are good follow-on exercises — see the [topic index in the README](READM
 
 - Mount perception WS on Studio’s HTTP server (single port)
 - Software AEC3 / residual-echo metrics
-- Prosody / LM / semantic endpointing (we only have a heuristic incomplete-final hold)
+- LM / prosody scoring on partial transcripts (there is now an ML waveform gate, [ADR-005](docs/adr-005-smartturn-commit-gate.md))
 - Speculative reply generation before EOU
 - Continuous screen share (we one-shot `getDisplayMedia`)
 - Desktop click/type automation (screenshot is observe-only)

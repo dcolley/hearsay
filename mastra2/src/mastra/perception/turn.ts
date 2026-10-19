@@ -63,7 +63,8 @@ export class SilenceTurnDetector implements TurnAdapter {
  * (`text_utterance`) are the sole turn commit. With ASR_MODE=http|mock,
  * this detector gates when Whisper/mock finalize runs.
  *
- * Env: TURN_MODE=adaptive|semantic|silence (semantic is an alias of adaptive).
+ * Env: TURN_MODE=adaptive|silence. Separately, TURN_GATE=off|smartturn
+ * (ADR-005) gates commits on the Smart Turn classifier.
  */
 export class AdaptiveSilenceTurnDetector implements TurnAdapter {
   private readonly minSpeechMs: number;
