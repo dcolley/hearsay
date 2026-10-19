@@ -207,11 +207,18 @@ export class PerceptionSession {
       deps.turnYield ?? createTurnYieldAdapter({ sustainMs });
     const gated = deps.turn as unknown as Partial<{
       setWindowProvider: (fn: () => Float32Array) => void;
+      setMetricHook: (
+        fn: (name: string, t_ms: number, detail?: Record<string, string | number | boolean>) => void,
+      ) => void;
       classifierMissing: boolean;
     }>;
     if (typeof gated.setWindowProvider === "function") {
       // Smart-turn gate: feed it the live utterance window (last 8 s).
       gated.setWindowProvider(() => this.getUtteranceWindow());
+      if (typeof gated.setMetricHook === "function") {
+        // Gate diagnostics (classifier failures) land on the metrics bus.
+        gated.setMetricHook((name, t_ms, detail) => this.metric(name, t_ms, detail));
+      }
       if (gated.classifierMissing) {
         this.metric("turn_gate", 0, { classifier: "missing", mode: "adaptive-silence" });
       }
@@ -760,6 +767,7 @@ export class PerceptionSession {
     this.listenSustain.reset();
     this.utteranceOpened = false;
     this.wasSpeech = false;
+    this.windowReset();
     this.bus.emit("listen_arm", {
       t_ms: base,
       armed: false,
@@ -804,7 +812,11 @@ export class PerceptionSession {
       : samples.slice();
     this.windowChunks.push(kept);
     this.windowSamples += kept.length;
+    // Clamp (never negative): the counter is total appended minus dropped,
+    // so it can never exceed the cap nor drift while the window is underfull.
     let excess = this.windowSamples - UTTERANCE_WINDOW_SAMPLES;
+    if (excess < 0) excess = 0;
+    let dropped = 0;
     while (excess > 0 && this.windowChunks.length > 1) {
       const first = this.windowChunks[0]!;
       const drop = Math.min(first.length, excess);
@@ -814,13 +826,13 @@ export class PerceptionSession {
         this.windowChunks[0] = first.slice(drop);
       }
       excess -= drop;
+      dropped += drop;
     }
     if (excess > 0) {
       this.windowChunks[0] = this.windowChunks[0]!.slice(excess);
-      excess = 0;
+      dropped += excess;
     }
-    this.windowSamples = UTTERANCE_WINDOW_SAMPLES - excess;
-    if (this.windowSamples < 0) this.windowSamples = 0;
+    this.windowSamples -= dropped;
   }
 
   private windowReset(): void {
