@@ -30,6 +30,7 @@ import {
 import { toSpokenReply } from "./reply-text.ts";
 import { NOT_CAUGHT, hasUnreadableScript } from "./speakable.ts";
 import { firstCompleteSentence } from "./sentences.ts";
+import { needsServerTool } from "./server-tool-intent.ts";
 import { SpeculativeTurn, type SpeculationState } from "./speculation.ts";
 import type { MemoryWriteGate } from "../memory/hearsay-memory.ts";
 import { ProgressNarrator } from "./progress.ts";
@@ -1085,16 +1086,30 @@ export class PerceptionSession {
       // ADR-007: speculation was started at likely-EOU. ASR may still be
       // finalizing; await it (the utterance buffer is still buffered for a
       // fallback commit) and promote if it is committable.
+      //
+      // Fix round handoff rule: an attempt that ENDS while we await (resume,
+      // needs-effects / server-tool / empty / asr-error discard, budget
+      // expiry, tool-intent) must NEVER swallow the confirmed turn. Exactly
+      // one of these happens - promote (attempt committed, done) or fall
+      // through to the ordinary commit exactly once.
       if (this.spec) {
         const spec = this.spec;
         const text = await spec.finalized;
-        if (this.spec !== spec) return; // discarded while we waited
-        if (text !== null && spec.turn.state === "speculative" && spec.turn.promote()) {
-          this.spec = null;
-          await this.commitSpeculative(spec, text, t_ms);
-          return;
+        if (this.spec === spec) {
+          // Conservative promotion (ADR-007 fix round, IMPORTANT-2b): the
+          // stream is continued ONLY when the run provably could not have
+          // needed tools - finalize cleared needsScreenshot, needsLiveVision,
+          // wantsOfferChoices, and needsServerTool, and a stream that emitted
+          // a tool-call discarded itself. Anything else never promotes.
+          if (text !== null && spec.turn.state === "speculative" && spec.turn.promote()) {
+            this.spec = null;
+            await this.commitSpeculative(spec, text, t_ms);
+            return;
+          }
+          this.discardSpeculation(spec, "commit-fallback");
         }
-        this.discardSpeculation(spec, "commit-fallback");
+        // attempt already ended (discarded during the await): hand the turn
+        // back to the ordinary path below, once.
       }
       await this.commitTurnNormal(t_ms);
     } finally {
@@ -1273,11 +1288,24 @@ export class PerceptionSession {
       this.discardSpeculation(spec, "needs-effects");
       return null;
     }
+    // ADR-007 fix round (IMPORTANT-2a): server-tool utterances (weather,
+    // web-search style) need a tool run to be truthful; a tools-off stream
+    // would fabricate the answer. Never speculate them - the ordinary path
+    // (tools available) handles the commit.
+    if (needsServerTool(text)) {
+      this.discardSpeculation(spec, "server-tool");
+      return null;
+    }
     spec.text = text;
     // think(spec) builds messages from this.utterance; a later ordinary
     // commit re-reads this.utterance after its own finalize.
     this.utterance = text;
     this.gateSetWritesBlocked(true);
+    // Minor-1 (ADR-007 fix round): make sure the storage-domain wrapper is
+    // installed BEFORE the stream's first persist, or file/remote storage
+    // latency widens the first-write race past the gate.
+    await this.gateEnsureInstalled();
+    if (this.spec !== spec) return null; // gate install outlived the attempt
     this.startSpecRun(spec);
     return text;
   }
@@ -1317,9 +1345,27 @@ export class PerceptionSession {
     this.gate()?.blockWrites(on);
   }
 
+  /**
+   * Install the storage-domain wrapper (Minor-1): must resolve before the
+   * first speculative stream so its early writes hit the buffer, not storage.
+   */
+  private async gateEnsureInstalled(): Promise<void> {
+    const g = this.gate() as Partial<MemoryWriteGate> | null;
+    if (typeof g?.ensureWriteGate === "function") await g.ensureWriteGate();
+  }
+
+  /**
+   * Persist everything buffered, then open the gate, as ONE ordered step
+   * (Minor-2): flushPending -> unblock leaves a window where a stream write
+   * racing the commit is buffered after the flush and lands late or never.
+   */
   private async gateFlushAndUnblock(): Promise<void> {
     const g = this.gate();
     if (!g) return;
+    if (typeof g.flushAndUnblock === "function") {
+      await g.flushAndUnblock();
+      return;
+    }
     await g.flushPending();
     g.blockWrites(false);
   }

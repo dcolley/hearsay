@@ -27,6 +27,16 @@ const RESOURCE_ID = "spec-test";
 type Chunk = { type: string; payload?: unknown };
 type StreamCall = { toolChoice?: unknown; abortSignal?: AbortSignal };
 
+/**
+ * Per-finalize-call ASR outcomes (fix round, IMPORTANT-1): an item is either
+ * a literal transcript or an outcome applied to the matching call:
+ * `delayMs` (realistic slow finalize so the outcome lands while commitTurn
+ * awaits spec.finalized), `error` (reject), `text` (""). The last item repeats
+ * for later calls - that models the ordinary commit re-finalizing after a
+ * discarded speculation attempt ended.
+ */
+type AsrOutcome = string | { text?: string; error?: string; delayMs?: number };
+
 function msg(role: "user" | "assistant", text: string, threadId: string) {
   return {
     id: randomUUID(),
@@ -45,6 +55,8 @@ function harness(cfg: {
   liveDeltas: string[];
   /** Speculative variant instead ends in a tool-call. */
   specToolCall?: boolean;
+  /** Per-call finalize outcomes (defaults to [asrText] repeated). */
+  asrSeq?: AsrOutcome[];
 }) {
   const spoken: string[] = [];
   const calls: StreamCall[] = [];
@@ -104,8 +116,15 @@ function harness(cfg: {
     turn: new AdaptiveSilenceTurnDetector(),
     asr: {
       finalize: async () => {
+        const seq = cfg.asrSeq ?? [cfg.asrText];
+        const item = seq[Math.min(finalizeCalls, seq.length - 1)];
         finalizeCalls++;
-        return cfg.asrText;
+        if (typeof item !== "string") {
+          if (item.delayMs) await delay(item.delayMs);
+          if (item.error) throw new Error(item.error);
+          return item.text ?? "";
+        }
+        return item;
       },
       reset: () => {},
     },
@@ -229,10 +248,10 @@ async function driveResumedTurn(h: H, resumeAt: number): Promise<void> {
   await waitListening(h);
 }
 
-function useSpecEnv(run: () => Promise<void>): Promise<void> {
+function useSpecEnv(run: () => Promise<void>, speculateMs = "1500"): Promise<void> {
   const keys = ["SPECULATE_MS", "SPECULATE_ADVANCE_MS"];
   const prev = keys.map((k) => [k, process.env[k]] as const);
-  process.env.SPECULATE_MS = "1500";
+  process.env.SPECULATE_MS = speculateMs;
   process.env.SPECULATE_ADVANCE_MS = "200";
   return run().finally(() => {
     for (const [k, v] of prev) {
@@ -324,11 +343,14 @@ describe("session: speculative generation (ADR-007)", () => {
     });
   });
 
-  it("tool fixture: tools off while speculative, effects run once after confirm", async () => {
+  it("tool-intent fixture: provider ignoring toolChoice:'none' -> discard, normal commit re-runs", async () => {
     await useSpecEnv(async () => {
+      // A phrase with NO server/client tool markers: speculation is allowed to
+      // run, the stream signals tool intent anyway, and the accepted discard
+      // fallback must still commit the turn exactly once.
       const h = harness({
-        asrText: "what is the weather like outside",
-        liveDeltas: ["It is twenty one degrees and sunny."],
+        asrText: "what is two plus two",
+        liveDeltas: ["The answer is two. "],
         specToolCall: true,
       });
       await h.memory.createThread({
@@ -341,12 +363,129 @@ describe("session: speculative generation (ADR-007)", () => {
       assert.equal(h.calls[0]!.toolChoice, "none", "speculative stream had tools disabled");
       assert.equal(h.calls.filter((c) => c.toolChoice === "none").length, 1);
       assert.equal(h.calls.filter((c) => c.toolChoice !== "none").length, 1);
+      assert.equal(h.weather.effects, 1, "effect executed exactly once, post-commit");
+      assert.equal(h.spoken.join(" "), "The answer is two.");
+      assert.deepEqual(await h.rows(), [
+        "what is two plus two",
+        "The answer is two.",
+      ]);
+    });
+  });
+
+  it("server-tool fixture (weather): speculation skipped at the gate, tool runs once normally", async () => {
+    await useSpecEnv(async () => {
+      // IMPORTANT-2 (a): weather phrasing matches the server-tool exclusion,
+      // so no speculative stream may start at all - the turn goes straight
+      // through the ordinary path where the tool actually executes.
+      const h = harness({
+        asrText: "what is the weather in london today",
+        liveDeltas: ["It is twenty one degrees and sunny."],
+        specToolCall: true, // if speculation DID run, this is what it would do
+      });
+      await h.memory.createThread({
+        threadId: h.session.threadId,
+        resourceId: RESOURCE_ID,
+        title: "spec",
+      });
+      await driveCompleteTurn(h);
+
+      assert.equal(
+        h.calls.filter((c) => c.toolChoice === "none").length,
+        0,
+        "server-tool utterances must never start a speculative stream",
+      );
+      assert.equal(h.calls.filter((c) => c.toolChoice !== "none").length, 1);
       assert.equal(h.weather.effects, 1, "weather effect executed exactly once, post-commit");
       assert.equal(h.spoken.join(" "), "It is twenty one degrees and sunny.");
       assert.deepEqual(await h.rows(), [
-        "what is the weather like outside",
+        "what is the weather in london today",
         "It is twenty one degrees and sunny.",
       ]);
     });
+  });
+});
+
+/**
+ * IMPORTANT-1 (review fix): every way a speculation attempt can END while
+ * commitTurn awaits spec.finalized (needs-effects / empty / asr-error /
+ * budget expiry) must hand the turn back to the ordinary commit path, which
+ * runs exactly once - never stall, never double-commit. The ASR finalize is
+ * delayed so the outcome lands during the commit await (the race the old
+ * `if (this.spec !== spec) return;` guard lost the confirmed turn on).
+ */
+describe("session: speculation ending during commit-await (ADR-007 fix round)", () => {
+  async function expectOrdinaryCommitAfterAttemptEnded(
+    cfg: Parameters<typeof harness>[0],
+    speculateMs: string,
+  ): Promise<void> {
+    await useSpecEnv(async () => {
+      const h = harness(cfg);
+      await h.memory.createThread({
+        threadId: h.session.threadId,
+        resourceId: RESOURCE_ID,
+        title: "spec",
+      });
+      await driveCompleteTurn(h);
+
+      const expected = h.spoken.join(" ");
+      assert.ok(expected.length > 0, "the ordinary commit must still speak");
+      const rows = await h.rows();
+      assert.equal(rows.length, 2, "exactly one user + one assistant pair persisted");
+      assert.equal(rows[0], cfg.asrText);
+      assert.equal((rows[1] ?? "").trim(), cfg.liveDeltas.join("").trim());
+      assert.equal(h.session.getState(), "listening", "turn must not stall");
+      assert.equal(
+        h.calls.filter((c) => c.toolChoice === "none").length,
+        0,
+        "an attempt that ended in a discard must never have promoted a stream",
+      );
+    }, speculateMs);
+  }
+
+  it("needs-effects discard during commit-await -> ordinary commit", async () => {
+    await expectOrdinaryCommitAfterAttemptEnded(
+      {
+        asrText: "what does my screen say right now",
+        liveDeltas: ["The screen shows a blank desktop."],
+        // first finalize (speculative) resolves LATE with a needsScreenshot
+        // transcript -> discarded at the exclusions gate while commit awaits.
+        asrSeq: [{ text: "what does my screen say right now", delayMs: 60 }, "what does my screen say right now"],
+      },
+      "1500",
+    );
+  });
+
+  it("empty-transcript discard during commit-await -> ordinary commit re-runs ASR", async () => {
+    await expectOrdinaryCommitAfterAttemptEnded(
+      {
+        asrText: "what is two plus two",
+        liveDeltas: ["The answer is two. "],
+        asrSeq: [{ text: "", delayMs: 60 }, "what is two plus two"],
+      },
+      "1500",
+    );
+  });
+
+  it("asr-error discard during commit-await -> ordinary commit re-runs ASR", async () => {
+    await expectOrdinaryCommitAfterAttemptEnded(
+      {
+        asrText: "what is two plus two",
+        liveDeltas: ["The answer is two. "],
+        asrSeq: [{ error: "finalize boom", delayMs: 60 }, "what is two plus two"],
+      },
+      "1500",
+    );
+  });
+
+  it("budget-expiry discard during commit-await -> ordinary commit", async () => {
+    await expectOrdinaryCommitAfterAttemptEnded(
+      {
+        asrText: "what is two plus two",
+        liveDeltas: ["The answer is two. "],
+        // finalize resolves after the (60 ms) budget has already expired.
+        asrSeq: [{ text: "what is two plus two", delayMs: 150 }, "what is two plus two"],
+      },
+      "60",
+    );
   });
 });
