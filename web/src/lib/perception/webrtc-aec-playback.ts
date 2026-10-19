@@ -152,6 +152,45 @@ export class WebrtcAecPlayback {
   }
 
   /**
+   * Silence over fadeMs, then hard stop (ADR-006). The send gain AudioParam
+   * ramps linearly, the remote element volume step-ramps (HTMLAudioElement
+   * volume is not schedulable), and the full cut lands after fadeMs.
+   */
+  stopWithFade(fadeMs: number): void {
+    if (fadeMs <= 0 || !this.ctx || !this.gain || !this.currentSource) {
+      this.stop();
+      return;
+    }
+    const ctx = this.ctx;
+    const param = this.gain.gain;
+    try {
+      const now = ctx.currentTime;
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(0, now + fadeMs / 1000);
+    } catch {
+      this.stop();
+      return;
+    }
+    if (this.remoteAudio) {
+      const el = this.remoteAudio;
+      const start = el.muted ? 0 : el.volume;
+      const steps = Math.max(1, Math.round(fadeMs / 25));
+      let i = 0;
+      const step = window.setInterval(() => {
+        i++;
+        if (i >= steps) {
+          window.clearInterval(step);
+          el.volume = 0;
+          return;
+        }
+        el.volume = Math.max(0, start * (1 - i / steps));
+      }, 25);
+    }
+    window.setTimeout(() => this.stop(), fadeMs);
+  }
+
+  /**
    * Hard barge — silence speakers now. Must mute remote HTMLAudioElement;
    * stopping the local source alone leaves WebRTC-buffered audio audible.
    */
