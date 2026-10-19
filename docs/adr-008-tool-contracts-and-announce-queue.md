@@ -70,7 +70,9 @@ No Mastra change is needed.
    cancel binding: waiting out a thinking user is the feature (ADR-003), and
    the bridge now attaches no timer at all to their calls. `async` tools
    answer `{ accepted: true, jobId }` immediately and resolve into the
-   announce queue.
+   announce queue. As of this writing no production tool registers
+   `kind: "async"`: the queue ships wired and tested, with no live
+   producer yet.
 
 3. **Client tools get per-call timeouts.** `ClientBridge.call` accepts
    `{ timeoutMs }`, set by the contract wrapper from the tool's effective
@@ -133,6 +135,13 @@ No Mastra change is needed.
 - Long async results arrive once, at the first genuinely quiet moment, and
   never interrupt a HITL question. Results older than two minutes are
   dropped rather than announced out of context.
+- Known limitation: a HITL prompt the user never answers blocks announce
+  drains for as long as it stays pending — `bridge.hasPending()` outranks
+  async results by design, and no TTL applies to the block itself (the
+  queued results do expire on the next drain visit, so nothing lingers
+  past `ANNOUNCE_TTL_MS`). The escape hatch is `reset()` or
+  `clearConversation()`: both clear the pending HITL calls, and the queue
+  drains again.
 - `ask_user` / `offer_choices` can no longer die to a bridge timer; HITL
   waits exactly as long as the user takes.
 - The announce path reuses the live-turn machinery (speak FIFO,
