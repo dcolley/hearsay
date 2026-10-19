@@ -137,6 +137,8 @@ export class AdaptiveSilenceTurnDetector implements TurnAdapter {
   }
 }
 
+export type GateState = "armed" | "pending" | "grace" | "commit-next";
+
 /**
  * Silence-only detector + semantic end-of-turn gate (Smart Turn v3).
  *
@@ -245,6 +247,11 @@ export class GatedTurnDetector implements TurnAdapter {
     this.state = "armed";
     this.disagreeCount = 0;
     this.graceFrom = null;
+  }
+
+  /** Exposed for tests / telemetry. */
+  debugState(): GateState {
+    return this.state;
   }
 
   private classifierRun(): void {
