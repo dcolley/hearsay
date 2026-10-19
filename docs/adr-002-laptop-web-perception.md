@@ -53,7 +53,7 @@ Beamforming / multi-mic delay-compensated models are **out of scope** for browse
 | `browser` | Browser STT finals (`text_utterance`) — PCM adaptive silence is advisory only |
 | `http` / `mock` | `AdaptiveSilenceTurnDetector` gates when ASR finalize runs |
 
-`TURN_MODE=adaptive` (alias: `semantic`) is adaptive **silence**, not a semantic LM.
+`TURN_MODE=adaptive` is adaptive **silence**, not a semantic LM. The `semantic` alias was retired by ADR-005 (it never was semantic).
 
 ### Speaker duplex (AEC sink + text echo filter)
 
