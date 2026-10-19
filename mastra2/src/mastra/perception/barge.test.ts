@@ -281,6 +281,28 @@ describe("ttsChunkDurationMs (chunk-derived floor)", () => {
     assert.equal(ttsChunkDurationMs({ audio: Buffer.alloc(3244), mime: "audio/wav" }), 100);
   });
 
+  it("divides duration by channel count (stereo L16)", () => {
+    // 6400 B @ 16 kHz: /2 bytes-per-sample /2 channels /16 samples-per-ms
+    // = 100 ms per channel. Ignoring channels would double it to 200.
+    assert.equal(
+      ttsChunkDurationMs({ audio: Buffer.alloc(6400), mime: "audio/L16;rate=16000;channels=2" }),
+      100,
+    );
+    assert.equal(
+      ttsChunkDurationMs({ audio: Buffer.alloc(6400), mime: "audio/pcm;rate=8000;channels=4" }),
+      100,
+    );
+    assert.equal(
+      ttsChunkDurationMs({ audio: Buffer.alloc(6400), mime: "audio/L16;rate=16000;channels=1" }),
+      200,
+    );
+    // Bad channel spec falls back to mono, never divides by zero.
+    assert.equal(
+      ttsChunkDurationMs({ audio: Buffer.alloc(6400), mime: "audio/L16;rate=16000;channels=0" }),
+      200,
+    );
+  });
+
   it("returns null when duration cannot be derived", () => {
     assert.equal(ttsChunkDurationMs({ audio: Buffer.alloc(6400), mime: "audio/mpeg" }), null);
     assert.equal(ttsChunkDurationMs({ text: "hi", mime: "text/plain" }), null);
