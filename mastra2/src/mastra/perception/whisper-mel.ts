@@ -103,6 +103,11 @@ for (let k = 0; k < N_FFT; k++) {
   CHIRP_IM[k] = ci;
 }
 
+// Scratch buffers for bluestein(). NOT reentrant: shared module-level state
+// is safe only because computeWhisperMel calls are serialized per
+// SmartTurnClassifier instance (single-threaded JS, one isEndOfTurn() in
+// flight per classifier). If computeWhisperMel ever gains a concurrent
+// caller, allocate these on entry instead of reusing them.
 const yRe = new Float64Array(BL_M);
 const yIm = new Float64Array(BL_M);
 const Xre = new Float64Array(FFT_BINS);
