@@ -92,6 +92,8 @@ export type SessionDeps = {
 };
 
 const MAX_UTTERANCE_SAMPLES = 16_000 * 30;
+/** Smart-turn gate window: last 8 s of utterance PCM, bounded. */
+const UTTERANCE_WINDOW_SAMPLES = 16_000 * 8;
 const FIRST_AUDIO_DEADLINE_MS = 900;
 const MIN_UTTERANCE_SAMPLES = 16_000 * 0.35;
 const PLAYBACK_DONE_TIMEOUT_MS = 45_000;
@@ -114,6 +116,9 @@ export class PerceptionSession {
   private turnAbort?: AbortController;
   private pcmChunks: Int16Array[] = [];
   private pcmSamples = 0;
+  /** Bounded tail window of the current utterance (16 kHz int16) for the turn gate. */
+  private windowChunks: Int16Array[] = [];
+  private windowSamples = 0;
   private wasSpeech = false;
   /** True after sustain gate passes for the current utterance. */
   private utteranceOpened = false;
@@ -424,6 +429,7 @@ export class PerceptionSession {
       // While soft-paused or hard-yielding into listen, keep buffering speech
       if (this.softBargePaused && vad.isSpeech) {
         this.appendPcm(frame.samples);
+        this.appendWindow(frame.samples);
       }
       return;
     }
@@ -444,6 +450,7 @@ export class PerceptionSession {
       (vad.isSpeech || (this.utteranceOpened && this.wasSpeech))
     ) {
       this.appendPcm(frame.samples);
+      this.appendWindow(frame.samples);
     }
 
     if (this.utteranceOpened && vad.isSpeech && !this.wasSpeech) {
@@ -461,6 +468,7 @@ export class PerceptionSession {
       if (!this.utteranceOpened) {
         this.pcmChunks = [];
         this.pcmSamples = 0;
+        this.windowReset();
       }
     }
   }
@@ -545,6 +553,7 @@ export class PerceptionSession {
   private commitTextUtterance(trimmed: string, t_ms: number): void {
     this.pcmChunks = [];
     this.pcmSamples = 0;
+    this.windowReset();
     this.deps.turn.reset();
     this.deps.vad.reset();
     this.listenSustain.reset();
@@ -776,6 +785,52 @@ export class PerceptionSession {
     this.pcmSamples += samples.length;
   }
 
+  /** Keep only the last UTTERANCE_WINDOW_SAMPLES in the gate window. */
+  private appendWindow(samples: Int16Array): void {
+    if (samples.length === 0) return;
+    const kept = samples.length > UTTERANCE_WINDOW_SAMPLES
+      ? samples.slice(samples.length - UTTERANCE_WINDOW_SAMPLES)
+      : samples.slice();
+    this.windowChunks.push(kept);
+    this.windowSamples += kept.length;
+    let excess = this.windowSamples - UTTERANCE_WINDOW_SAMPLES;
+    while (excess > 0 && this.windowChunks.length > 1) {
+      const first = this.windowChunks[0]!;
+      const drop = Math.min(first.length, excess);
+      if (drop === first.length) {
+        this.windowChunks.shift();
+      } else {
+        this.windowChunks[0] = first.slice(drop);
+      }
+      excess -= drop;
+    }
+    if (excess > 0) {
+      this.windowChunks[0] = this.windowChunks[0]!.slice(excess);
+      excess = 0;
+    }
+    this.windowSamples = UTTERANCE_WINDOW_SAMPLES - excess;
+    if (this.windowSamples < 0) this.windowSamples = 0;
+  }
+
+  private windowReset(): void {
+    this.windowChunks = [];
+    this.windowSamples = 0;
+  }
+
+  /**
+   * Last 8 s of the current utterance, zero-padded at the front, as float32
+   * (int16 / 32768). Shape is always 128000 samples — the smart-turn gate's
+   * classifier window.
+   */
+  getUtteranceWindow(): Float32Array {
+    const out = new Float32Array(UTTERANCE_WINDOW_SAMPLES);
+    let offset = UTTERANCE_WINDOW_SAMPLES - Math.min(this.windowSamples, UTTERANCE_WINDOW_SAMPLES);
+    for (const chunk of this.windowChunks) {
+      for (let i = 0; i < chunk.length; i++) out[offset++] = chunk[i]! / 32768;
+    }
+    return out;
+  }
+
   private concatPcm(): Int16Array {
     const out = new Int16Array(this.pcmSamples);
     let offset = 0;
@@ -794,6 +849,7 @@ export class PerceptionSession {
     const pcm = this.concatPcm();
     this.pcmChunks = [];
     this.pcmSamples = 0;
+    this.windowReset();
     this.deps.turn.reset();
     this.deps.vad.reset();
     this.listenSustain.reset();
@@ -1315,6 +1371,7 @@ export class PerceptionSession {
     this.interruptHeard = null;
     this.pcmChunks = [];
     this.pcmSamples = 0;
+    this.windowReset();
     this.wasSpeech = false;
     this.partial = "";
     this.utterance = "";
