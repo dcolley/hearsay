@@ -77,6 +77,10 @@ export class AdaptiveSilenceTurnDetector implements TurnAdapter {
   private speechStartedAt: number | null = null;
   private lastSpeechAt: number | null = null;
   private committed = false;
+  /** Speculative advance window (ADR-007), read once so tests are stable. */
+  private readonly speculativeAdvanceMs: number;
+  private likelyEouCb: ((t_ms: number) => void) | null = null;
+  private likelyEouFired = false;
 
   constructor(opts?: {
     minSpeechMs?: number;
@@ -86,6 +90,7 @@ export class AdaptiveSilenceTurnDetector implements TurnAdapter {
     silenceMidMs?: number;
     silenceLongUtterMs?: number;
     silenceNoiseBurstMs?: number;
+    speculativeAdvanceMs?: number;
   }) {
     this.minSpeechMs = opts?.minSpeechMs ?? 250;
     this.shortSpeechMs = opts?.shortSpeechMs ?? 800;
@@ -94,6 +99,21 @@ export class AdaptiveSilenceTurnDetector implements TurnAdapter {
     this.silenceMidMs = opts?.silenceMidMs ?? 550;
     this.silenceLongUtterMs = opts?.silenceLongUtterMs ?? 400;
     this.silenceNoiseBurstMs = opts?.silenceNoiseBurstMs ?? 1100;
+    this.speculativeAdvanceMs =
+      opts?.speculativeAdvanceMs ?? Number(process.env.SPECULATE_ADVANCE_MS || 200);
+  }
+
+  /**
+   * Install a likely-EOU callback (ADR-007 speculation hook). The session
+   * wires this only when speculation is enabled (SPECULATE_MS > 0,
+   * ASR_MODE http|mock); passing null removes it. The callback fires ONCE
+   * per utterance, at `silenceNeededMs(speechMs) - speculativeAdvanceMs`
+   * of trailing silence - i.e. shortly before onVad would return true.
+   * Resumed speech re-arms it. onVad return values are unchanged.
+   */
+  setLikelyEouCallback(cb: ((t_ms: number) => void) | null): void {
+    this.likelyEouCb = cb;
+    this.likelyEouFired = false;
   }
 
   onVad(result: VadResult, t_ms: number): boolean {
@@ -101,6 +121,7 @@ export class AdaptiveSilenceTurnDetector implements TurnAdapter {
       if (this.speechStartedAt === null) this.speechStartedAt = t_ms;
       this.lastSpeechAt = t_ms;
       this.committed = false;
+      this.likelyEouFired = false;
       return false;
     }
 
@@ -116,7 +137,22 @@ export class AdaptiveSilenceTurnDetector implements TurnAdapter {
     if (speechMs < this.minSpeechMs) return false;
 
     const needSilence = this.silenceNeededMs(speechMs);
-    if (t_ms - this.lastSpeechAt >= needSilence) {
+    const silentMs = t_ms - this.lastSpeechAt;
+
+    // ADR-007: fire the early "likely end of utterance" once, inside the
+    // advance window but strictly before the real commit threshold.
+    if (
+      this.likelyEouCb &&
+      !this.likelyEouFired &&
+      this.speculativeAdvanceMs > 0 &&
+      silentMs >= needSilence - this.speculativeAdvanceMs
+    ) {
+      this.likelyEouFired = true;
+      const cb = this.likelyEouCb;
+      cb(t_ms);
+    }
+
+    if (silentMs >= needSilence) {
       this.committed = true;
       return true;
     }
@@ -187,6 +223,15 @@ export class GatedTurnDetector implements TurnAdapter {
   /** Inject the session's utterance window (last 8 s float32). */
   setWindowProvider(fn: () => Float32Array): void {
     this.windowProvider = fn;
+  }
+
+  /**
+   * Forward the speculation hook (ADR-007) to the wrapped adaptive detector.
+   * The likely-EOU callback fires before the gate ever decides to commit;
+   * a resumed utterance is discarded by the session's resume check.
+   */
+  setLikelyEouCallback(cb: ((t_ms: number) => void) | null): void {
+    this.base.setLikelyEouCallback(cb);
   }
 
   onVad(result: VadResult, t_ms: number): boolean {
