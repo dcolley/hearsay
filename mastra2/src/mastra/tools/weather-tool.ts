@@ -1,5 +1,5 @@
-import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { withToolContract } from "./with-contract.ts";
 
 /** WMO weather interpretation codes (Open-Meteo). */
 function conditionsFromCode(code: number): string {
@@ -93,8 +93,9 @@ async function fetchCurrentWeather(location: string) {
   };
 }
 
-export const weatherTool = createTool({
+export const weatherTool = withToolContract({
   id: "get-weather",
+  kind: "sync",
   description:
     "Get current weather for a city or place using Open-Meteo (temperature, conditions, humidity, wind).",
   inputSchema: z.object({
@@ -109,5 +110,5 @@ export const weatherTool = createTool({
     humidityPercent: z.number().nullable(),
     windSpeedKmh: z.number().nullable(),
   }),
-  execute: async ({ location }) => fetchCurrentWeather(location),
+  execute: async ({ location }: { location: string }) => fetchCurrentWeather(location),
 });

@@ -22,7 +22,7 @@ type Pending = {
   args: Record<string, unknown>;
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
 };
 
 const WORD_NUMBERS = [
@@ -111,6 +111,7 @@ export class ClientBridge {
   call(
     tool: ClientActionRequest["tool"],
     args: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
   ): Promise<unknown> {
     if (!this.sendAction) {
       return Promise.reject(new Error("No client connected for tool bridge"));
@@ -118,15 +119,23 @@ export class ClientBridge {
 
     const id = randomUUID();
     const req: ClientActionRequest = { id, tool, args };
+    // HITL tools wait for the user and must NOT carry a deadline (ADR-003 /
+    // ADR-008); every other client tool uses its per-call/per-tool timeout,
+    // falling back to the bridge global default.
+    const hitl = tool === "ask_user" || tool === "offer_choices";
+    const timeoutMs = hitl ? 0 : (opts?.timeoutMs ?? this.timeoutMs);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Client tool timed out: ${tool}`));
-      }, this.timeoutMs);
+      const timer =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              this.pending.delete(id);
+              reject(new Error(`Client tool timed out: ${tool}`));
+            }, timeoutMs)
+          : undefined;
 
       this.pending.set(id, { tool, args, resolve, reject, timer });
       this.sendAction!(req);
-      if (tool === "ask_user" || tool === "offer_choices") {
+      if (hitl) {
         this.onHitlWait?.(tool);
       }
     });
@@ -144,7 +153,7 @@ export class ClientBridge {
   resolveResult(msg: ClientActionResult): void {
     const pending = this.pending.get(msg.id);
     if (!pending) return;
-    clearTimeout(pending.timer);
+    if (pending.timer) clearTimeout(pending.timer);
     this.pending.delete(msg.id);
     if (msg.ok) pending.resolve(msg.result ?? {});
     else pending.reject(new Error(msg.error || "Client tool failed"));
@@ -157,7 +166,7 @@ export class ClientBridge {
   resolveAskUserAnswer(answer: string): boolean {
     for (const [id, pending] of this.pending) {
       if (pending.tool === "ask_user") {
-        clearTimeout(pending.timer);
+        if (pending.timer) clearTimeout(pending.timer);
         this.pending.delete(id);
         pending.resolve({ answer });
         return true;
@@ -166,7 +175,7 @@ export class ClientBridge {
         const choices = Array.isArray(pending.args.choices)
           ? pending.args.choices.map((c) => String(c))
           : [];
-        clearTimeout(pending.timer);
+        if (pending.timer) clearTimeout(pending.timer);
         this.pending.delete(id);
         pending.resolve(matchChoiceResult(answer, choices));
         return true;
@@ -177,7 +186,7 @@ export class ClientBridge {
 
   clear(): void {
     for (const [, p] of this.pending) {
-      clearTimeout(p.timer);
+      if (p.timer) clearTimeout(p.timer);
       p.reject(new Error("Client bridge cleared"));
     }
     this.pending.clear();
@@ -189,5 +198,6 @@ export type ClientBridgeHandle = {
   call: (
     tool: ClientActionRequest["tool"],
     args: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
   ) => Promise<unknown>;
 };

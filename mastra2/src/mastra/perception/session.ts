@@ -9,6 +9,7 @@ import {
   emptySceneWorkingMemory,
 } from "../memory/scene-schema.ts";
 import type { AsrAdapter } from "./asr.ts";
+import { AnnounceQueue, type AnnounceMessage } from "./announce-queue.ts";
 import { EventBus, type PerceptionEvents } from "./bus.ts";
 import {
   ClientBridge,
@@ -99,6 +100,17 @@ export type SessionDeps = {
     ackAfterMs?: number;
     stillAfterMs?: number;
     maxStill?: number;
+  };
+  /**
+   * Deferred announcements (ADR-008): async tool results wait for silence
+   * before speaking. Env fallbacks: ANNOUNCE_SILENCE_MS / ANNOUNCE_TTL_MS.
+   * `pollMs` is the drain poll timer (default 300; tests inject small values
+   * the same way progress timings are injected).
+   */
+  announce?: {
+    silenceMs?: number;
+    ttlMs?: number;
+    pollMs?: number;
   };
 };
 
@@ -230,6 +242,23 @@ export class PerceptionSession {
   /** Re-entrancy guard for the commit path (speculation awaits ASR). */
   private committing = false;
 
+  /**
+   * Deferred announcements (ADR-008): async tool results wait here until the
+   * room is silent, then speak through the same FIFO. Announce clock is
+   * server wall clock (Date.now), independent of the client media clock.
+   */
+  readonly announceQueue: AnnounceQueue;
+  private readonly announcePollMs: number;
+  private announcePollTimer?: ReturnType<typeof setInterval>;
+  private announceDraining = false;
+  /** Messages spoken by the current announce drain (barge re-queues these). */
+  private announceActive: AnnounceMessage[] | null = null;
+  /** Wall-clock ms of the most recent user speech event (frame/utterance/barge). */
+  private lastSpeechAtMs = 0;
+
+  /** Last think() request context (test hook for async tools outside a stream). */
+  private lastRequestContext?: RequestContext;
+
   constructor(private readonly deps: SessionDeps) {
     this.halfDuplex = deps.halfDuplex ?? true;
     this.bargeInEnabled = deps.bargeInEnabled ?? false;
@@ -278,6 +307,28 @@ export class PerceptionSession {
     this.scene = deps.vision.getScene();
     this._threadId = isThreadId(deps.threadId) ? deps.threadId.trim() : randomUUID();
     this.resourceId = deps.resourceId || hearsayResourceId;
+
+    // ADR-008 deferred announcements: results land in the queue and speak at
+    // the next silent moment, fed by VAD ticks, push events, and a poll.
+    this.announceQueue = new AnnounceQueue({
+      ...(deps.announce?.silenceMs !== undefined
+        ? { silenceMs: deps.announce.silenceMs }
+        : {}),
+      ...(deps.announce?.ttlMs !== undefined ? { ttlMs: deps.announce.ttlMs } : {}),
+      hasPendingHitl: () => this.bridge.hasPending(),
+    });
+    this.announcePollMs =
+      deps.announce?.pollMs ?? (Number(process.env.ANNOUNCE_POLL_MS || 300) || 0);
+    if (this.announcePollMs > 0) {
+      this.announcePollTimer = setInterval(() => {
+        void this.tryDrainAnnouncements();
+      }, this.announcePollMs);
+      this.announcePollTimer.unref?.();
+    }
+    // A result landing is worth an immediate drain check (still gated on silence).
+    this.announceQueue.onPushed(() => {
+      void this.tryDrainAnnouncements();
+    });
 
     // ADR-007 speculation: off by default (SPECULATE_MS=0 -> bit-identical).
     // In scope for ASR_MODE=http|mock only; browser STT owns commit otherwise.
@@ -396,6 +447,9 @@ export class PerceptionSession {
     this.interruptHeard = null;
     this.utterance = "";
     this.partial = "";
+    // A fresh conversation drops pending async results too.
+    this.announceQueue.clear();
+    this.announceActive = null;
     if (this.playbackDoneWaiter) {
       clearTimeout(this.playbackDoneWaiter.timer);
       this.playbackDoneWaiter.resolve();
@@ -525,6 +579,7 @@ export class PerceptionSession {
   async onAudio(frame: PcmFrame): Promise<void> {
     this.clientNow(frame.t_ms);
     const vad = await Promise.resolve(this.deps.vad.process(frame));
+    if (vad.isSpeech) this.lastSpeechAtMs = Date.now();
 
     // Speaking / thinking: turn-yield path only (when barge enabled)
     if (this.state === "speaking" || this.state === "thinking") {
@@ -585,10 +640,13 @@ export class PerceptionSession {
         this.pcmSamples = 0;
         this.windowReset();
       }
+      // Silence ticks also feed the ADR-008 announce drain gate.
+      void this.tryDrainAnnouncements();
     }
   }
 
   onSpeechStart(t_ms: number): void {
+    this.lastSpeechAtMs = Date.now();
     if (this.state === "speaking" && this.bargeInEnabled) {
       this.bargeIn(t_ms);
     }
@@ -601,6 +659,7 @@ export class PerceptionSession {
     const trimmed = text.trim();
     if (!hasSpeechContent(trimmed)) return;
     this.clientNow(t_ms);
+    this.lastSpeechAtMs = Date.now();
 
     // Spoken answer to an in-flight ask_user — resume the agent tool, don't barge
     if (this.bridge.resolveAskUserAnswer(trimmed)) {
@@ -861,6 +920,9 @@ export class PerceptionSession {
       return;
     }
     this.clearIncompleteHold();
+    this.lastSpeechAtMs = Date.now();
+    // An announce caught mid-speech goes back to the queue (no loss).
+    this.requeueAnnouncements(t_ms);
     const heard = this.partialSpoken.trim();
     this.interruptHeard = heard || null;
     if (heard) {
@@ -1275,6 +1337,12 @@ export class PerceptionSession {
     return this.spec?.turn.state ?? "idle";
   }
 
+  /** Test hook: the request context of the last think() (async tools that
+   *  run outside a real stream, e.g. integration fixtures). */
+  debugRequestContext(): RequestContext {
+    return this.lastRequestContext ?? new RequestContext();
+  }
+
   private async think(spec?: SpeculationRun): Promise<void> {
     if (!hasSpeechContent(this.utterance)) {
       if (!spec) this.setState("listening");
@@ -1323,6 +1391,12 @@ export class PerceptionSession {
     const requestContext = new RequestContext();
     requestContext.set("clientBridge", this.bridge);
     requestContext.set("clearConversation", () => this.clearConversation());
+    // ADR-008: tools observe turn cancellation via context.abortSignal (the
+    // stream loop forwards the stream's abortSignal into the tool execute
+    // context); this key is the documented fallback for wrappers that build
+    // their own context. The queue carries async results (gap 4).
+    requestContext.set("announceQueue", this.announceQueue);
+    this.lastRequestContext = requestContext;
 
     // Ground visual questions before the agent answers (Spark chat cannot see
     // tool-result images). Screen/UI → screenshot; physical scene → webcam.
@@ -1352,6 +1426,11 @@ export class PerceptionSession {
     // ADR-007: speculative runs abort through spec.abort (owned by the
     // speculation machinery); live runs through this.turnAbort.
     const abortSignal = spec ? spec.abort.signal : this.turnAbort!.signal;
+
+    // ADR-008 turn cancellation: the stream loop forwards this signal into
+    // every tool execute context as `context.abortSignal`; the requestContext
+    // copy is the documented fallback (see with-contract.ts).
+    this.lastRequestContext?.set("turnAbortSignal", abortSignal);
 
     const t0 = performance.now();
     let rawBuf = "";
@@ -1761,6 +1840,80 @@ export class PerceptionSession {
     }
   }
 
+  // --- deferred announcements (ADR-008) ------------------------------------
+
+  /** Small hysteresis so "just spoke" still counts as not silent. */
+  private static readonly ANNOUNCE_QUIET_MS = 150;
+
+  /**
+   * Drain gated announcements into the speak FIFO when the room is really
+   * quiet: never over a live turn (thinking / speaking / playback) and never
+   * while speculation holds the floor. `tts_flush` fires only after the FIFO
+   * drains, and the announce speaks through the ordinary FIFO so playback,
+   * echo floor, and barge behave like any other speech.
+   */
+  private async tryDrainAnnouncements(): Promise<void> {
+    if (this.announceDraining) return;
+    if (this.thinking || this.spec) return;
+    const stateNow: AgentState = this.getState();
+    if (stateNow === "thinking" || stateNow === "speaking") return;
+    if (this.playbackOpen) return;
+    const now = Date.now();
+    const isSilent = now - this.lastSpeechAtMs >= PerceptionSession.ANNOUNCE_QUIET_MS;
+    const first = this.announceQueue.maybeDrain(now, isSilent, false);
+    if (!first) return;
+    const batch: AnnounceMessage[] = [first];
+    for (;;) {
+      const next = this.announceQueue.maybeDrain(now, isSilent, false);
+      if (!next) break;
+      batch.push(next);
+    }
+
+    this.announceDraining = true;
+    this.announceActive = batch;
+    // Fresh controller so a barge-in during the announce itself can stop it
+    // (speakFragment breaks on the abort signal), same contract as a turn.
+    const speakAbort = new AbortController();
+    this.turnAbort = speakAbort;
+    try {
+      for (const msg of batch) this.enqueueSpeak(msg.text);
+      await this.drainSpeakQueue();
+      const afterQueue: AgentState = this.getState();
+      if (!speakAbort.signal.aborted && afterQueue === "speaking") {
+        this.metric("announce_drained", this.clientNow(), {
+          count: batch.length,
+          tools: batch.map((m) => m.tool ?? "?").join(","),
+        });
+        this.bus.emit("tts_flush", { t_ms: this.clientNow() });
+        await this.waitForPlaybackDone();
+        if (!speakAbort.signal.aborted) {
+          const doneAt = this.clientNow();
+          this.bus.emit("tts_end", { t_ms: doneAt });
+          this.beginListenArm(doneAt);
+          this.setState("listening");
+        }
+      }
+    } finally {
+      this.announceDraining = false;
+      if (this.announceActive === batch) this.announceActive = null;
+    }
+  }
+
+  /**
+   * A barge-in that caught the announce mid-speech: re-queue what was in
+   * flight so the result lands at the next silent moment - interruption
+   * must not lose the result (ADR-008).
+   */
+  private requeueAnnouncements(t_ms: number): void {
+    if (!this.announceActive) return;
+    const now = Date.now();
+    for (const msg of [...this.announceActive].reverse()) {
+      this.announceQueue.requeue({ id: msg.id, tool: msg.tool, text: msg.text }, now);
+    }
+    this.metric("announce_requeued", t_ms, { count: this.announceActive.length });
+    this.announceActive = null;
+  }
+
   private async speakFragment(text: string): Promise<void> {
     if (this.turnAbort?.signal.aborted) return;
     this.setState("speaking");
@@ -1814,6 +1967,8 @@ export class PerceptionSession {
     this.deps.asr.reset();
     this.deps.vision.reset();
     this.bridge.clear();
+    this.announceQueue.clear();
+    this.announceActive = null;
     this.clearIncompleteHold();
     if (this.listenArmTimer) clearTimeout(this.listenArmTimer);
     if (this.playbackDoneWaiter) {

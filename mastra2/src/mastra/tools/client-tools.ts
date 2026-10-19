@@ -1,5 +1,5 @@
-import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { getContractTimeoutMs, withToolContract } from "./with-contract.ts";
 import {
   createHearsayMemory,
   hearsayResourceId,
@@ -39,7 +39,7 @@ type ClearConversationFn = () => Promise<{
   resourceId: string;
 }>;
 
-export const clearConversationTool = createTool({
+export const clearConversationTool = withToolContract({
   id: "clear_conversation",
   description:
     "Clear the current Presence conversation memory and start a fresh thread. Call when the user asks to start over, clear the chat, reset, or wipe the conversation. Do not claim history is gone without calling this.",
@@ -78,8 +78,9 @@ export const clearConversationTool = createTool({
   },
 });
 
-export const askUserTool = createTool({
+export const askUserTool = withToolContract({
   id: "ask_user",
+  kind: "hitl",
   description:
     "Ask the user a clarifying question and wait for their answer before continuing.",
   inputSchema: z.object({
@@ -103,8 +104,9 @@ export const askUserTool = createTool({
   },
 });
 
-export const offerChoicesTool = createTool({
+export const offerChoicesTool = withToolContract({
   id: "offer_choices",
+  kind: "hitl",
   description:
     "REQUIRED whenever the user asks for choices, options, a menu, or anything to pick from. Present 2–6 short clickable/speakable titles. Do NOT write numbered options in your spoken reply — put them only in this tool's choices array. Speak one short invite sentence, then call this tool.",
   inputSchema: z.object({
@@ -193,8 +195,10 @@ function cameraFrameToModelOutput(output: CameraFrameOutput) {
   };
 }
 
-export const requestCameraFrameTool = createTool({
+export const requestCameraFrameTool = withToolContract({
   id: "request_camera_frame",
+  kind: "client",
+  timeoutMs: 120_000,
   description:
     "Request a fresh webcam frame (camera facing the user/room) and receive a grounded description. Use for the physical scene, person, hands, or room. Do NOT use for the computer screen, desktop, or UI — use capture_screenshot instead.",
   inputSchema: z.object({
@@ -214,9 +218,11 @@ export const requestCameraFrameTool = createTool({
       };
     }
 
-    const result = (await bridge.call("request_camera_frame", {
-      reason: input.reason ?? "",
-    })) as {
+    const result = (await bridge.call(
+      "request_camera_frame",
+      { reason: input.reason ?? "" },
+      { timeoutMs: getContractTimeoutMs(context?.requestContext) },
+    )) as {
       ok?: boolean;
       description?: string;
       dataUrl?: string;
@@ -308,8 +314,10 @@ function screenshotToModelOutput(output: CameraFrameOutput) {
   };
 }
 
-export const captureScreenshotTool = createTool({
+export const captureScreenshotTool = withToolContract({
   id: "capture_screenshot",
+  kind: "client",
+  timeoutMs: 120_000,
   description:
     "REQUIRED when the user says look at the screen/display/desktop/monitor or asks what is on screen. Captures screen, window, or browser tab via the browser share picker and returns a grounded UI description. Not for webcam — use request_camera_frame for the camera.",
   inputSchema: z.object({
@@ -331,9 +339,11 @@ export const captureScreenshotTool = createTool({
       };
     }
 
-    const result = (await bridge.call("capture_screenshot", {
-      reason: input.reason ?? "",
-    })) as {
+    const result = (await bridge.call(
+      "capture_screenshot",
+      { reason: input.reason ?? "" },
+      { timeoutMs: getContractTimeoutMs(context?.requestContext) },
+    )) as {
       ok?: boolean;
       description?: string;
       dataUrl?: string;

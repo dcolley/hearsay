@@ -1,5 +1,5 @@
-import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { withToolContract } from "./with-contract.ts";
 
 const DEFAULT_TZ =
   process.env.HEARSAY_TIMEZONE?.trim() ||
@@ -88,7 +88,7 @@ function resolveZone(input?: string): string {
 }
 
 /** Current local (or requested) date and time. */
-export const getDateTimeTool = createTool({
+export const getDateTimeTool = withToolContract({
   id: "get_date_time",
   description:
     "Get the current date and time. Use whenever the user asks what time or day it is, or you need an accurate now for scheduling. Optional IANA timezone (e.g. Europe/London).",
@@ -135,7 +135,7 @@ export const getDateTimeTool = createTool({
 });
 
 /** Interpret an ISO / date string in a timezone (or convert "now" relative display). */
-export const formatDateTimeTool = createTool({
+export const formatDateTimeTool = withToolContract({
   id: "format_date_time",
   description:
     "Format or convert a specific date/time into a timezone. Pass an ISO-8601 string (or YYYY-MM-DD). Use for 'what day is that' / timezone conversion — not for current time (use get_date_time).",

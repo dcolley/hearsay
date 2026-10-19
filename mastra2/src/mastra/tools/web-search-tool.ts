@@ -1,5 +1,5 @@
-import { createTool } from "@mastra/core/tools";
 import { getTavilyClient } from "@mastra/tavily";
+import { withToolContract } from "./with-contract.ts";
 import { z } from "zod";
 
 const resultSchema = z.object({
@@ -48,7 +48,7 @@ function searchToModelOutput(output: SearchOutput) {
  * Live web search via Tavily (same stack as Phase-0 mastra).
  * Prefer this over browser automation for spoken Q&A.
  */
-export const webSearchTool = createTool({
+export const webSearchTool = withToolContract({
   id: "web_search",
   description:
     "Search the live web for current facts, news, and sources. Use instead of guessing about recent events or things you do not know.",
