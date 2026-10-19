@@ -119,7 +119,14 @@ skipped, and conversation memory is hard-blocked for the whole speculative
 phase. On commit the held sentences speak in order, the stream continues
 without restarting, memory flushes exactly once, and the gate opens. On resume
 the stream aborts, timers drop, held text vanishes, and every buffered memory
-write is discarded - so a discarded speculation leaves zero rows. LiveKit's
+write is discarded - so a discarded speculation leaves zero rows. Utterances
+whose answer needs a SERVER tool (weather / web-search phrasing, matched by
+[`server-tool-intent.ts`](mastra2/src/mastra/perception/server-tool-intent.ts))
+are excluded at the gate and never speculated; promotion of the same stream is
+therefore only possible when the run provably could not have needed tools.
+When an attempt ends for any reason while the commit awaits ASR finalize, the
+turn falls through to the ordinary commit exactly once - a confirmed turn is
+never lost. LiveKit's
 pipeline does the same; Mastra's issue mastra-ai/mastra#22873 is the failure
 mode this design avoids: partial speculative messages persisting into memory
 threads. A write-gate spike proved the real `agent.stream()` path persists via
@@ -129,9 +136,10 @@ write gate lands as step 1 before any speculation can run.
 `ASR_MODE=browser` is out of scope (STT owns commit).
 
 - State machine: [`speculation.ts`](mastra2/src/mastra/perception/speculation.ts) `SpeculativeTurn` (idle -> speculative -> committed | discarded, injectable timers)
+- Server-tool exclusion gate: [`server-tool-intent.ts`](mastra2/src/mastra/perception/server-tool-intent.ts) (weather / web-search phrasing; tools-off speculation would fabricate those answers)
 - Hook: `setLikelyEouCallback` in [`turn.ts`](mastra2/src/mastra/perception/turn.ts)
 - Wiring: `onLikelyEou` / `finalizeSpeculative` / `commitSpeculative` / `discardSpeculation` / `emitOrHold` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
-- Write gate: `blockWrites` / `flushPending` / `clearPending` (subclass + storage domain) in [`hearsay-memory.ts`](mastra2/src/mastra/memory/hearsay-memory.ts)
+- Write gate: `blockWrites` / `flushPending` / `flushAndUnblock` / `clearPending` (subclass + storage domain) in [`hearsay-memory.ts`](mastra2/src/mastra/memory/hearsay-memory.ts)
 - Env: `SPECULATE_MS` (budget, default 0 = off), `SPECULATE_ADVANCE_MS` (default 200)
 - Tests: [`speculation.test.ts`](mastra2/src/mastra/perception/speculation.test.ts), [`session.speculation.test.ts`](mastra2/src/mastra/perception/session.speculation.test.ts), [`memory-write-gate.test.ts`](mastra2/src/mastra/memory/memory-write-gate.test.ts)
 - Decision: [ADR-007](docs/adr-007-speculative-generation.md)
