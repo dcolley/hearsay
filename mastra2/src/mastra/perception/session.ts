@@ -842,7 +842,7 @@ export class PerceptionSession {
 
   /**
    * Last 8 s of the current utterance, zero-padded at the front, as float32
-   * (int16 / 32768). Shape is always 128000 samples — the smart-turn gate's
+   * (int16 / 32768). Shape is always 128000 samples - the smart-turn gate's
    * classifier window.
    */
   getUtteranceWindow(): Float32Array {

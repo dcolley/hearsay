@@ -1,5 +1,5 @@
 /**
- * Whisper log-mel feature extractor — TypeScript port of the HuggingFace
+ * Whisper log-mel feature extractor - TypeScript port of the HuggingFace
  * transformers WhisperFeatureExtractor (the exact tensor smart-turn-v3
  * consumes), for 16 kHz mono float32 audio, 8 s window.
  *
@@ -9,9 +9,9 @@
  * 1. Truncate/zero-pad input to 128000 samples (8 s). Normalization runs
  *    over the valid (pre-pad) length only: x = (x - mean) / sqrt(var + 1e-7).
  * 2. Center padding of 200 samples at each end uses Slaney REFLECT (mirror
- *    excluding the edge sample), not zero padding — confirmed by fixtures.
+ *    excluding the edge sample), not zero padding - confirmed by fixtures.
  * 3. STFT: 400-sample frames, periodic Hann window, hop 160, FFT size 400
- *    (not a power of two — computed exactly via Bluestein), one-sided
+ *    (not a power of two - computed exactly via Bluestein), one-sided
  *    power spectrum over 201 bins.
  * 4. 80-channel mel filterbank, Slaney piecewise-linear mel scale
  *    (linear <= 1 kHz, log above), area normalization (2 / (f[k+1] - f[k-1])).
