@@ -7,7 +7,7 @@ export { EnergyVad, type VadAdapter } from "./vad.ts";
 export {
   SilenceTurnDetector,
   AdaptiveSilenceTurnDetector,
-  SemanticTurnDetector,
+  GatedTurnDetector,
   createTurnDetector,
   type TurnAdapter,
 } from "./turn.ts";
