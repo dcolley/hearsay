@@ -205,6 +205,17 @@ export class PerceptionSession {
     };
     this.turnYield =
       deps.turnYield ?? createTurnYieldAdapter({ sustainMs });
+    const gated = deps.turn as unknown as Partial<{
+      setWindowProvider: (fn: () => Float32Array) => void;
+      classifierMissing: boolean;
+    }>;
+    if (typeof gated.setWindowProvider === "function") {
+      // Smart-turn gate: feed it the live utterance window (last 8 s).
+      gated.setWindowProvider(() => this.getUtteranceWindow());
+      if (gated.classifierMissing) {
+        this.metric("turn_gate", 0, { classifier: "missing", mode: "adaptive-silence" });
+      }
+    }
     this.scene = deps.vision.getScene();
     this._threadId = isThreadId(deps.threadId) ? deps.threadId.trim() : randomUUID();
     this.resourceId = deps.resourceId || hearsayResourceId;

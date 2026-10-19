@@ -37,7 +37,7 @@ async function createSession(opts?: { threadId?: string }) {
     agent: hearsayAgent,
     memory: hearsayMemory,
     vad: await createVadAdapter(),
-    turn: createTurnDetector(),
+    turn: await createTurnDetector(),
     asr: createAsrAdapter(asrMode),
     tts: createTtsAdapter(),
     vision: new StubVisionAdapter(),
