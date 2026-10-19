@@ -326,12 +326,7 @@ export class PerceptionSession {
     });
     this.announcePollMs =
       deps.announce?.pollMs ?? (Number(process.env.ANNOUNCE_POLL_MS || 300) || 0);
-    if (this.announcePollMs > 0) {
-      this.announcePollTimer = setInterval(() => {
-        void this.tryDrainAnnouncements();
-      }, this.announcePollMs);
-      this.announcePollTimer.unref?.();
-    }
+    this.armAnnouncePoll();
     // A result landing is worth an immediate drain check (still gated on silence).
     this.announceQueue.onPushed(() => {
       void this.tryDrainAnnouncements();
@@ -668,6 +663,9 @@ export class PerceptionSession {
     if (!hasSpeechContent(trimmed)) return;
     this.clientNow(t_ms);
     this.lastSpeechAtMs = Date.now();
+    // Activity counts: a reset() disarms the announce poll, the first
+    // utterance back re-arms it.
+    this.armAnnouncePoll();
 
     // Spoken answer to an in-flight ask_user — resume the agent tool, don't barge
     if (this.bridge.resolveAskUserAnswer(trimmed)) {
@@ -1854,6 +1852,27 @@ export class PerceptionSession {
   private static readonly ANNOUNCE_QUIET_MS = 150;
 
   /**
+   * (Re-)arm the drain poll. Idempotent. Called by the constructor and
+   * lazily by the first activity after a `reset()` stopped it — a closed
+   * session must not keep an interval pinning it to the process.
+   */
+  private armAnnouncePoll(): void {
+    if (this.announcePollMs <= 0 || this.announcePollTimer) return;
+    this.announcePollTimer = setInterval(() => {
+      void this.tryDrainAnnouncements();
+    }, this.announcePollMs);
+    this.announcePollTimer.unref?.();
+  }
+
+  /** Disarm the drain poll (nothing scheduled may survive a reset). */
+  private stopAnnouncePoll(): void {
+    if (this.announcePollTimer) {
+      clearInterval(this.announcePollTimer);
+      this.announcePollTimer = undefined;
+    }
+  }
+
+  /**
    * Drain gated announcements into the speak FIFO when the room is really
    * quiet: never over a live turn (thinking / speaking / playback) and never
    * while speculation holds the floor. `tts_flush` fires only after the FIFO
@@ -2011,6 +2030,10 @@ export class PerceptionSession {
     this.announceQueue.clear();
     this.announceActive = null;
     this.announceSpoken = 0;
+    // The poll interval must NOT survive a reset: ws-server resets on WS
+    // close, and an uncleared interval pins the closed session forever.
+    // It re-arms lazily on the next activity (onTextUtterance).
+    this.stopAnnouncePoll();
     this.clearIncompleteHold();
     if (this.listenArmTimer) clearTimeout(this.listenArmTimer);
     if (this.playbackDoneWaiter) {

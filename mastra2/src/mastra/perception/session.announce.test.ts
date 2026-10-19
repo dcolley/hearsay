@@ -282,4 +282,59 @@ describe("session: deferred announcements (ADR-008)", () => {
     assert.equal(started.filter((s) => s === ALPHA).length, 1, "alpha never re-started");
     assert.equal(session.announceQueue.size(), 0);
   });
+
+  it("reset() leaves no announce poll timer running; the next utterance re-arms it", async () => {
+    // The poll interval is a setInterval per session: ws-server calls
+    // reset() on WS close, and an interval surviving reset pins the closed
+    // session for the process lifetime. Trap global interval creation.
+    type Trap = { fires: number; cleared: boolean };
+    const created = new Map<NodeJS.Timeout, Trap>();
+    const origSet = globalThis.setInterval as unknown as (
+      ...a: any[]
+    ) => NodeJS.Timeout;
+    const origClear = globalThis.clearInterval as unknown as (...a: any[]) => void;
+    (globalThis as any).setInterval = (fn: () => void, ms: number) => {
+      const id = origSet(() => {
+        const trap = created.get(id);
+        if (trap) trap.fires++;
+        fn();
+      }, ms);
+      created.set(id, { fires: 0, cleared: false });
+      return id;
+    };
+    (globalThis as any).clearInterval = (id: NodeJS.Timeout) => {
+      const trap = created.get(id);
+      if (trap) trap.cleared = true;
+      return origClear(id);
+    };
+    try {
+      const spoken: string[] = [];
+      const session = makeSession(spoken, { current: "reply" }, makeEchoTool(50), {
+        current: 5,
+      });
+      assert.equal(created.size, 1, "exactly one session interval (announce poll)");
+      const [pollId] = [...created.keys()];
+      const poll = created.get(pollId)!;
+      await delay(200);
+      assert.ok(poll.fires >= 1, "the poll timer is live before reset");
+
+      session.reset();
+      assert.equal(poll.cleared, true, "reset() must clearInterval the announce poll");
+      const firesAtReset = poll.fires;
+      await delay(300); // > 3 poll ticks (80 ms)
+      assert.equal(poll.fires, firesAtReset, "no poll callback after reset");
+      assert.equal(created.size, 1, "reset() must not re-arm immediately");
+
+      // Lazy re-arm: the first utterance after a reset brings the poll back.
+      session.onTextUtterance("re arm the poll timer", Date.now());
+      assert.equal(created.size, 2, "next activity re-arms the poll");
+      const rearmed = created.get([...created.keys()][1]!)!;
+      await delay(200);
+      assert.ok(rearmed.fires >= 1, "re-armed poll is live");
+      session.reset();
+    } finally {
+      (globalThis as any).setInterval = origSet;
+      (globalThis as any).clearInterval = origClear;
+    }
+  });
 });
