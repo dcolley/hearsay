@@ -86,6 +86,7 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 | End of utterance (browser STT vs Whisper) | [LEARN — End of utterance](LEARN.md#end-of-utterance-listen-path) |
 | Incomplete-final hold (heuristic EOU) | [LEARN — Incomplete-final hold](LEARN.md#incomplete-final-hold) |
 | ML end-of-turn gate, Smart Turn v3 (ADR-005) | [LEARN — Semantic turn gate](LEARN.md#semantic-turn-gate-adr-005) |
+| Speculative generation (ADR-007) | [LEARN — Speculative generation](LEARN.md#speculative-generation-adr-007) |
 | Streaming TTS by sentence | [LEARN — Streaming spoken replies](LEARN.md#streaming-spoken-replies) |
 | Progress speech while tools run (ADR-003) | [LEARN — Progress speech](LEARN.md#progress-speech-talks-while-it-works) |
 | Speakable guard: CJK drift never spoken (ADR-004) | [LEARN — Speakable guard](LEARN.md#speakable-guard-adr-004) |
@@ -173,6 +174,8 @@ See [`mastra2/.env.example`](./mastra2/.env.example). Important knobs:
 | `SMART_TURN_MODEL_PATH` | model override; `yarn models` fetches the default to `~/.cache/hearsay/` (ADR-005) |
 | `SMART_TURN_THRESHOLD` | classifier threshold, default `0.5` (ADR-005) |
 | `TURN_GATE_GRACE_MS` | extend after an "unfinished" verdict, default `600` (ADR-005) |
+| `SPECULATE_MS` | speculative generation budget, default `0` = off (ADR-007; `http|mock` ASR only) |
+| `SPECULATE_ADVANCE_MS` | likely-EOU advance window before commit, default `200` (ADR-007) |
 | `PROGRESS_ENABLED` | talk-while-working narration (default `true`; `false` = silent until answer) |
 | `PROGRESS_ACK_MS` / `PROGRESS_STILL_MS` / `PROGRESS_MAX_STILL` | narration timing (defaults 3000 / 20000 / 6) |
 | `HEARSAY_RESOURCE_ID` | shared memory across chat + presence |

@@ -107,6 +107,35 @@ The adaptive silence detector commits on timing, not sentence shape. With `TURN_
 - Weights: `yarn models` (explicit, no postinstall hook); missing model = one warning + `turn_gate=fallback`, behaviour = `off`
 - Decision: [ADR-005](docs/adr-005-smartturn-commit-gate.md)
 
+### Speculative generation (ADR-007)
+
+Waiting out the full silence threshold before touching ASR or the LLM is pure
+latency, so the session generates early: at "likely EOU" (silence time minus
+`SPECULATE_ADVANCE_MS`, default 200, fires the detector's likely-EOU callback
+once per utterance) it finalizes ASR on the buffered PCM and starts the agent
+stream. Output is HELD (spoken sentences go to a buffer, never the FIFO),
+tool calls are disabled with `toolChoice: "none"`, screen/webcam grounding is
+skipped, and conversation memory is hard-blocked for the whole speculative
+phase. On commit the held sentences speak in order, the stream continues
+without restarting, memory flushes exactly once, and the gate opens. On resume
+the stream aborts, timers drop, held text vanishes, and every buffered memory
+write is discarded - so a discarded speculation leaves zero rows. LiveKit's
+pipeline does the same; Mastra's issue mastra-ai/mastra#22873 is the failure
+mode this design avoids: partial speculative messages persisting into memory
+threads. A write-gate spike proved the real `agent.stream()` path persists via
+the storage memory domain and bypasses `Memory.saveMessages`, which is why the
+write gate lands as step 1 before any speculation can run.
+`SPECULATE_MS=0` (default) is bit-identical to base;
+`ASR_MODE=browser` is out of scope (STT owns commit).
+
+- State machine: [`speculation.ts`](mastra2/src/mastra/perception/speculation.ts) `SpeculativeTurn` (idle -> speculative -> committed | discarded, injectable timers)
+- Hook: `setLikelyEouCallback` in [`turn.ts`](mastra2/src/mastra/perception/turn.ts)
+- Wiring: `onLikelyEou` / `finalizeSpeculative` / `commitSpeculative` / `discardSpeculation` / `emitOrHold` in [`session.ts`](mastra2/src/mastra/perception/session.ts)
+- Write gate: `blockWrites` / `flushPending` / `clearPending` (subclass + storage domain) in [`hearsay-memory.ts`](mastra2/src/mastra/memory/hearsay-memory.ts)
+- Env: `SPECULATE_MS` (budget, default 0 = off), `SPECULATE_ADVANCE_MS` (default 200)
+- Tests: [`speculation.test.ts`](mastra2/src/mastra/perception/speculation.test.ts), [`session.speculation.test.ts`](mastra2/src/mastra/perception/session.speculation.test.ts), [`memory-write-gate.test.ts`](mastra2/src/mastra/memory/memory-write-gate.test.ts)
+- Decision: [ADR-007](docs/adr-007-speculative-generation.md)
+
 ### Streaming spoken replies
 
 Agent text is flushed to TTS in sentence-sized chunks so first audio starts before the full answer exists. Client drains a queue and sends `playback_done` when truly finished.
