@@ -386,6 +386,17 @@ export class PerceptionSession {
     return { threadId: this._threadId, resourceId: this.resourceId };
   }
 
+  /**
+   * Clock to anchor issued-audio scheduling. Media clock once any client
+   * frame/utterance has established it; server clock until then — otherwise
+   * a stalled mic before the first utterance collapses the horizon toward
+   * 0 and under-deafens (F6). The trade is over- vs under-deafening: when
+   * client media time is unknown we err toward suppressing echo.
+   */
+  private scheduleNowMs(): number {
+    return this.lastClientTms > 0 ? this.lastClientTms : performance.now();
+  }
+
   /** Prefer client media clock; fall back to last seen frame time. */
   private clientNow(hint?: number): number {
     if (typeof hint === "number" && Number.isFinite(hint) && hint > 0) {
@@ -1352,7 +1363,7 @@ export class PerceptionSession {
     // t_ms). Used only when no chunk durations are available (ADR-006); the
     // live floor is audioIssuedEndAt + margin, updated per issued chunk.
     const now = this.clientNow();
-    this.bargeEchoUntil = now + this.listenArmMs;
+    this.bargeEchoUntil = this.scheduleNowMs() + this.listenArmMs;
     this.turnYield.reset();
     if (!this.firstTtsLogged && this.utteranceWallStartedAt != null) {
       this.firstTtsLogged = true;
@@ -1375,7 +1386,7 @@ export class PerceptionSession {
         const durationMs = ttsChunkDurationMs(chunk);
         if (durationMs != null) {
           this.audioIssuedEndAt =
-            Math.max(this.audioIssuedEndAt, this.clientNow()) + durationMs;
+            Math.max(this.audioIssuedEndAt, this.scheduleNowMs()) + durationMs;
         }
       }
     } catch (err) {

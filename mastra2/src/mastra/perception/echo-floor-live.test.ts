@@ -209,3 +209,36 @@ describe("session: clearConversation echo-state reset (F4)", () => {
     }
   });
 });
+
+describe("session: schedule anchor with a stalled client clock (F6)", () => {
+  it("never anchors issued audio at 0 when no client frame has established a media clock", async () => {
+    const { session } = makeLiveSession();
+    try {
+      // t_ms=0 is ignored by clientNow (no client clock yet — mic stalled
+      // before the first utterance).
+      const serverBefore = performance.now();
+      const flushed = new Promise<void>((resolve) => {
+        const off = session.bus.on("tts_flush", () => {
+          off();
+          resolve();
+        });
+      });
+      session.onTextUtterance("tell me something long", 0);
+      await flushed;
+      const endAt = (session as unknown as { audioIssuedEndAt: number })
+        .audioIssuedEndAt;
+      // Old behavior: 0 + durations only (~3000 media-ms from zero).
+      // Fixed: anchored on the server clock, so the horizon is past
+      // "now + durations", not collapsed toward 0.
+      assert.ok(
+        endAt >= serverBefore + CHUNKS * CHUNK_MS * 0.9,
+        `horizon ${endAt} collapsed toward 0 (server now ${Math.round(serverBefore)})`,
+      );
+      const echoUntil = (session as unknown as { bargeEchoUntil: number })
+        .bargeEchoUntil;
+      assert.ok(echoUntil >= serverBefore);
+    } finally {
+      session.reset();
+    }
+  });
+});
