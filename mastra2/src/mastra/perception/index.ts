@@ -2,7 +2,7 @@ export { EventBus, type PerceptionEvents } from "./bus.ts";
 export { PerceptionSession, type SessionDeps } from "./session.ts";
 export { startPerceptionWsServer } from "./ws-server.ts";
 export { createAsrAdapter, HttpAsrAdapter, MockAsrAdapter } from "./asr.ts";
-export { createTtsAdapter, HttpTtsAdapter, BrowserTtsAdapter } from "./tts.ts";
+export { createTtsAdapter, HttpTtsAdapter, BrowserTtsAdapter, checkTtsEndpoint } from "./tts.ts";
 export { EnergyVad, type VadAdapter } from "./vad.ts";
 export {
   SilenceTurnDetector,

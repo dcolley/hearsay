@@ -385,10 +385,36 @@ Presence and CopilotKit share `HEARSAY_RESOURCE_ID` (working memory / scene). Ea
 | In-browser Kokoro | synthesize → blob → audio queue | Yes (same sink) |
 | In-browser Pocket TTS | synthesize → WAV blob → audio queue | Yes (same sink) |
 | HTTP sidecar (`TTS_MODE=http`) | MP3 over WS → audio queue | Yes |
+| Phonon sidecar (`TTS_FORMAT=pcm`) | 24 kHz PCM over WS → audio queue | Yes |
 
 - Kokoro client: [`web/src/lib/perception/kokoro-tts.ts`](web/src/lib/perception/kokoro-tts.ts)
 - Pocket client: [`web/src/lib/perception/pocket-tts.ts`](web/src/lib/perception/pocket-tts.ts)
 - Server TTS adapters: [`mastra2/src/mastra/perception/tts.ts`](mastra2/src/mastra/perception/tts.ts)
+
+### Phonon sidecar (offline TTS)
+
+[ADR-009](docs/adr-009-phonon-tts-sidecar.md). `ghcr.io/gradium-ai/ptts-openai-server`
+(Phonon 31m, Apache 2.0) speaks OpenAI's `/v1/audio/speech` from a Docker
+container bound to loopback — no new Node service; `HttpTtsAdapter` is the
+whole integration.
+
+Start: `docker compose -f mastra2/docker/ptts/compose.yaml up -d`, then set
+`TTS_MODE=http`, `TTS_URL=http://127.0.0.1:8880`, a `TTS_VOICE` from
+`GET /v1/audio/voices`, and `TTS_FORMAT=pcm`. The checkpoint is pinned by
+commit SHA in the compose file, and the named volume caches weights + voices
+after first boot — the container then needs **no network** (robotics /
+intermittent-connectivity deploys pre-seed the volume on a connected
+machine).
+
+Why `pcm` over mp3: `ttsChunkDurationMs` derives duration from byte count,
+so the barge echo window (ADR-006) goes dynamic instead of the static
+`LISTEN_ARM_MS` fallback. A dead sidecar logs one warning naming the compose
+command (`checkTtsEndpoint` boot probe) and never blocks startup.
+
+Tuning is server-side: `PTTS_CONDITION=duration_delta=…` (prosody — the model
+has no request-level `speed`), `PTTS_MAX_CONCURRENT_REQUESTS` (1 matches the
+speak FIFO), `PTTS_VOICE_DIR` for custom voice files. Cloning and multilingual
+are out of scope — Pocket clone and Kokoro remain those stories.
 
 ### Pocket built-in voices
 

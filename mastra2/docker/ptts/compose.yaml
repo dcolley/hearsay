@@ -1,0 +1,41 @@
+# Phonon TTS sidecar (ADR-009) — offline OpenAI-compatible speech server.
+#
+# First start downloads the pinned checkpoint + default voices into the
+# named volume. After that the container needs no network — safe for
+# intermittent-connectivity (robotics) deployments. Prepare the volume on a
+# connected machine, then ship/snapshot it.
+#
+# Start:  docker compose -f mastra2/docker/ptts/compose.yaml up -d
+# Log:    docker compose -f mastra2/docker/ptts/compose.yaml logs -f
+# Verify: curl -s localhost:8880/health && curl -s localhost:8880/v1/audio/voices
+#
+# hearsay side (mastra2/.env):
+#   TTS_MODE=http  TTS_URL=http://127.0.0.1:8880  TTS_VOICE=Freya  TTS_FORMAT=pcm
+
+services:
+  ptts:
+    # Pin an image release at deploy time (amd64 + arm64, CPU-only).
+    image: ghcr.io/gradium-ai/ptts-openai-server:latest
+    restart: unless-stopped
+    # No auth on this server — bind loopback only.
+    ports:
+      - "127.0.0.1:8880:8880"
+    environment:
+      # gradium/phonon-31m-en @ sha 52433c46 — Apache 2.0, English. Pinning
+      # freezes the checkpoint; without it, cache floats on repo main.
+      PTTS_MODEL: hf://gradium/phonon-31m-en@52433c46975bfa13144c56204c9f4ee1c5b148aa
+      PTTS_LANG: en
+      # hearsay's speak FIFO is serial; 1 slot gives predictable latency and
+      # clean 429/server_busy backpressure.
+      PTTS_MAX_CONCURRENT_REQUESTS: "1"
+      # Prosody tuning knob (repeatable); defaults used when unset:
+      # PTTS_CONDITION: duration_delta=0.3
+      # Custom voice files (e.g. downloads from Gradium Studio):
+      #   uncomment PTTS_VOICE_DIR + mount below, files land in ./voices/
+      # PTTS_VOICE_DIR: /voices
+    volumes:
+      - phonon-cache:/home/phonon/.cache/huggingface
+      # - ./voices:/voices:ro
+
+volumes:
+  phonon-cache:

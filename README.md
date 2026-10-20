@@ -135,6 +135,7 @@ Use this index as a backlog of features to implement yourself. Each link jumps t
 |-------|------------|
 | System voice vs Kokoro vs HTTP sidecar | [LEARN — TTS engines](LEARN.md#tts-engines) |
 | Pocket TTS built-in voices | [LEARN — Pocket built-in voices](LEARN.md#pocket-built-in-voices) |
+| Phonon offline sidecar (ADR-009) | [LEARN — Phonon sidecar](LEARN.md#phonon-sidecar-offline-tts) |
 | Voice clone modal (separate from engine pick) | [LEARN — Voice clone](LEARN.md#voice-clone-separate-from-choosing-pocket) |
 | Where clone / model data is stored | [LEARN — Where voice data lives](LEARN.md#where-voice-data-lives) |
 | Only blob/PCM engines get acoustic AEC | [LEARN — AEC sink](LEARN.md#engine-agnostic-aec-sink) |
@@ -186,6 +187,7 @@ See [`mastra2/.env.example`](./mastra2/.env.example). Important knobs:
 | `TOOL_TIMEOUT_MS` | per-tool contract deadline, default `15000` (ADR-008) |
 | `ANNOUNCE_SILENCE_MS` | silent streak required before announcing an async result, default `1200` (ADR-008) |
 | `ANNOUNCE_TTL_MS` | age past which an unannounced result is dropped, default `120000` (ADR-008) |
+| `TTS_FORMAT` | `mp3` (default) or `pcm` — pcm (Phonon sidecar) derives chunk durations for the echo window (ADR-009) |
 | `HEARSAY_RESOURCE_ID` | shared memory across chat + presence |
 | `HEARSAY_TIMEZONE` | default for date/time tools |
 | `TAVILY_API_KEY` | web search |

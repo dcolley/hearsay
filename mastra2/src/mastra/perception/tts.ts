@@ -18,6 +18,9 @@ export interface TtsAdapter {
   stop(): void;
 }
 
+/** Headerless int16 mono at 24 kHz — what Phonon serves for response_format=pcm. */
+export const PCM_24K_MONO_MIME = "audio/L16; rate=24000; channels=1";
+
 /** OpenAI-compatible POST {TTS_URL}/v1/audio/speech */
 export class HttpTtsAdapter implements TtsAdapter {
   private aborted = false;
@@ -28,6 +31,8 @@ export class HttpTtsAdapter implements TtsAdapter {
     private readonly apiKey = process.env.OPENAI_API_KEY || "sk-dummy",
     private readonly model = process.env.TTS_MODEL || "tts-1",
     private readonly voice = process.env.TTS_VOICE || "af_heart",
+    /** "mp3" (default, Kokoro/Piper) or "pcm" (Phonon sidecar, ADR-009). */
+    private readonly format = (process.env.TTS_FORMAT || "mp3").toLowerCase(),
   ) {}
 
   async *synthesize(text: string): AsyncIterable<TtsChunk> {
@@ -50,7 +55,7 @@ export class HttpTtsAdapter implements TtsAdapter {
           model: this.model,
           input: trimmed,
           voice: this.voice,
-          response_format: "mp3",
+          response_format: this.format === "pcm" ? "pcm" : "mp3",
         }),
         signal: this.fetchAbort.signal,
       });
@@ -70,7 +75,11 @@ export class HttpTtsAdapter implements TtsAdapter {
 
     const buf = Buffer.from(await res.arrayBuffer());
     if (this.aborted) return;
-    yield { audio: buf, mime: "audio/mpeg", text: trimmed };
+    yield {
+      audio: buf,
+      mime: this.format === "pcm" ? PCM_24K_MONO_MIME : "audio/mpeg",
+      text: trimmed,
+    };
   }
 
   stop(): void {
@@ -127,6 +136,24 @@ export function ttsChunkDurationMs(chunk: TtsChunk): number | null {
   return null;
 }
 
+/**
+ * One-shot liveness check: GET {baseUrl}/health with a short budget.
+ * True only on an HTTP response; false on refusal, timeout, or 4xx/5xx.
+ */
+export async function checkTtsEndpoint(baseUrl: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 500);
+  try {
+    const url = `${baseUrl.replace(/\/$/, "")}/health`;
+    const res = await fetch(url, { signal: controller.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createTtsAdapter(): TtsAdapter {
   const mode = (process.env.TTS_MODE || "http").toLowerCase();
   if (mode === "browser") return new BrowserTtsAdapter();
@@ -135,5 +162,16 @@ export function createTtsAdapter(): TtsAdapter {
     console.warn("[tts] TTS_URL unset — using browser text fallback");
     return new BrowserTtsAdapter();
   }
+  // Boot probe: one warning line if nothing answers, so a dead sidecar fails
+  // loudly instead of on every turn. Never blocks startup. (ADR-009)
+  void checkTtsEndpoint(url).then((ok) => {
+    if (!ok) {
+      console.warn(
+        `[tts] no endpoint answered ${url} — start the Phonon sidecar with ` +
+          "`docker compose -f mastra2/docker/ptts/compose.yaml up -d`, " +
+          "point TTS_URL at Kokoro/Piper, or set TTS_MODE=browser.",
+      );
+    }
+  });
   return new HttpTtsAdapter(url);
 }
